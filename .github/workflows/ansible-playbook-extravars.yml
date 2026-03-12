@@ -18,6 +18,11 @@ on:
             required: true
             type: string
             description: "Target environment for the build (e.g. development, staging, production)"
+        runner:
+            required: true
+            type: string
+            default: 'ubuntu-latest'
+            description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
 
         # Ansible settings
         ansible_ssh_enabled:
@@ -80,7 +85,7 @@ on:
 
 jobs:
   ansible:
-    runs-on: [onpremise-ubuntu-general]
+    runs-on: ${{ inputs.runner }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
