@@ -143,8 +143,11 @@ jobs:
                /usr/local/bin/argocd-2.11.2 app wait "${{ inputs.argocd_app_name }}" --grpc-web --health --timeout 600; then
 
               echo "✅ Successfully deployed ArgoCD app"
-              echo "📋 Attempting to fetch application logs (this may fail safely if no logs are available)..."
+              echo "📋 Attempting to fetch application logs (errors are ignored; logs are optional)..."
 
+              # The `app logs` command is purely informational.  If it fails for any
+              # reason we do **not** want to abort the workflow, so temporarily disable
+              # errexit and handle errors manually.
               set +e
               /usr/local/bin/argocd-2.11.2 app logs --group apps --tail 60 "${{ inputs.argocd_app_name }}" 2>/dev/null || {
                 echo "⚠️ Unable to fetch logs - this could be due to:"
