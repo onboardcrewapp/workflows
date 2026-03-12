@@ -129,6 +129,10 @@ jobs:
   slow, consider splitting the operation into multiple jobs with manual control.
 - **Slack messages missing**: Verify the bot token has `chat:write` and `reactions:write` scopes
   and that `slack_notify_enabled` is `true` with a valid `slack_channel_id`.
+- **Log command errors**: the ArgoCD CLI may print fatal errors such as
+  `parsing time "unable" as ...` when streaming logs. These messages are
+  benign; the workflow ignores any failure from `argocd app logs` and continues.
+  The presence of such logs will not cause the job to fail.
 
 ## Notes for External Use
 
