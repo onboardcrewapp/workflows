@@ -17,9 +17,13 @@ Steps performed by the workflow:
 1. Send a "start" message to Slack (if enabled).
 2. Login to the ArgoCD server using the provided credentials, with retry logic in case of
 temporary failures.
-3. Process any release arguments supplied and append them to the `argocd app set` command.
+3. Populate a `RELEASE_ARGS` variable from the `argocd_release_args` input and append them
+   to the `argocd app set` command (empty string is accepted and simply results in no
+   additional parameters).
 4. Perform application operations in sequence: `set` → `sync` → `wait` (sync, operation,
-health), each with a 10‑minute timeout and retry wrapper.
+   health), each with a 10‑minute timeout and retry wrapper. The job also sets the GitHub
+   `environment` attribute to the value of the `argocd_app_env` input so that deployments
+   are properly scoped.
 5. Attempt to fetch the last 60 lines of application logs (failure is tolerated).
 6. Send a Slack notification on success or failure, along with a reaction emoji.
 
@@ -33,7 +37,9 @@ directives, it’s not suitable as a drop‑in for arbitrary projects; use as in
 | `repository_name` | Repository name (used for logging). |
 | `argocd_server_url` | URL of the ArgoCD server to target. |
 | `argocd_app_name` | Name of the ArgoCD application to operate on. |
-| `argocd_app_env` | Logical environment name (e.g. `staging`, `production`). Used in field values. |
+| `argocd_app_env` | Logical environment name (e.g. `staging`, `production`). Used in field
+values and assigned directly to the GitHub job `environment` property so that the run
+appears under the correct environment in the UI. |
 | `argocd_release_args` | Arguments to pass to `argocd app set` in `KEY=VALUE` format, one per line. |
 | `tag` | Docker image tag or other release identifier. |
 | `runner` | GitHub runner label (defaults to `ubuntu-latest`). |
@@ -52,7 +58,10 @@ directives, it’s not suitable as a drop‑in for arbitrary projects; use as in
 ## Optional Inputs and Defaults
 
 Most inputs besides those listed above are optional or have sensible defaults. In particular
-`runner` defaults to `ubuntu-latest` and `slack_notify_enabled` defaults to `false`.
+`runner` defaults to `ubuntu-latest` and `slack_notify_enabled` defaults to `false`. The
+`argocd_release_args` input is technically marked required by the workflow schema, but an
+empty string is accepted; leaving it empty simply means no extra `-p key=value` arguments
+will be passed to `argocd app set`.
 
 ## Example 1: Minimal Call (no Slack)
 
