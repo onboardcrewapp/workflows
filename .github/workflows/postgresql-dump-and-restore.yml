@@ -1,0 +1,315 @@
+# This workflow performs a dump and restore of a PostgreSQL database, with options to customize the dump and restore process. It also includes Slack notifications for build events.
+---
+name: "PostgreSQL Dump and Restore"
+
+on:
+  workflow_call:
+    inputs:
+        runner:
+            required: true
+            type: string
+            default: 'ubuntu-latest'
+            description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+        # Source Database
+        source_db_host:
+            type: string
+            description: "Source Host"
+        source_db_port:
+            type: string
+            description: "Source Port"
+        source_db_name:
+            type: string
+            description: "Source Database"
+
+        # Destination Database
+        destination_db_host:
+            type: string
+            description: "Destination Host"
+        destination_db_port:
+            type: string
+            description: "Destination Port"
+        destination_db_name:
+            type: string
+            description: "Destination Database"
+
+        # Dump and Restore Options
+        format:
+            type: string
+            description: "Dump Format"
+            default: "c"
+        blobs_enabled:
+            type: boolean
+            description: "Enable Blobs"
+            default: true
+        no_owner_enabled:
+            type: boolean
+            description: "Disable Owner"
+            default: true
+        no_privileges_enabled:
+            type: boolean
+            description: "Disable Privileges"
+            default: true
+        no_acl_enabled:
+            type: boolean
+            description: "Disable ACL"
+            default: true
+
+        exclude_tables_from_dump:
+            type: string
+            description: "A space-separated list of tables to exclude from the dump (e.g., 'logs audit_trail')."
+            required: false
+            default: ""
+
+        skip_database_drop:
+            type: boolean
+            description: "Set to true to skip dropping the database. Use with exclude_tables_from_dump to preserve existing tables."
+            required: false
+            default: false
+
+        # Slack notification settings
+        slack_notify_enabled:
+            required: true
+            type: boolean
+            default: false
+            description: "Enable/disable Slack notifications for build events"
+        slack_channel_id:
+            required: false
+            type: string
+            description: "Slack channel to send build notifications to"
+
+    secrets:
+        SLACK_BOT_TOKEN:
+            required: false
+        SOURCE_DB_USERNAME:
+            required: true
+        SOURCE_DB_PASSWORD:
+            required: true
+        DESTINATION_DB_USERNAME:
+            required: true
+        DESTINATION_DB_PASSWORD:
+            required: true
+
+jobs:
+  dump_and_restore:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Send Slack - Start
+        if: ${{ inputs.slack_notify_enabled }}
+        id: "slack"
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            username: "PostgreSQL Dump and Restore"
+            attachments:
+              - fallback: "Restoring ${{ inputs.destination_db_name }} on ${{ inputs.destination_db_host }} using ${{ inputs.source_db_name }} on ${{ inputs.source_db_host }}."
+                color: "#2eb886"
+                author_name: "${{ github.actor }}"
+                author_link: "${{ github.server_url }}/${{ github.actor }}"
+                author_icon: "${{ github.server_url }}/${{ github.actor }}.png?size=32"
+                fields:
+                  - title: "PostgreSQL Database"
+                    value: "Restoring ${{ inputs.destination_db_name }} on ${{ inputs.destination_db_host }} using ${{ inputs.source_db_name }} on ${{ inputs.source_db_host }}. This will clean up any existing data in the destination database and restore the data from the source database."
+                actions:
+                  - type: "button"
+                    text: "View Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Dump and Restore
+        env:
+          PSQL_SOURCE_DB_SETTINGS: "host=${{ inputs.source_db_host }} port=${{ inputs.source_db_port }} dbname=${{ inputs.source_db_name }} user=${{ secrets.SOURCE_DB_USERNAME }} password=${{ secrets.SOURCE_DB_PASSWORD }}"
+          PSQL_DESTINATION_DB_SETTINGS: "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=${{ inputs.destination_db_name }} user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}"
+        run: |
+          set -x
+          # Define dump file path and directory
+          DUMP_DIR="${{ github.workspace }}-${{ inputs.source_db_host }}-${{ inputs.source_db_name }}-${{ github.run_id }}-${{ github.run_attempt }}"
+          DUMP_FILE="${DUMP_DIR}/dump.sql"
+
+          # Create directory for dump file
+          mkdir -p "${DUMP_DIR}"
+
+          # First define common options used by both commands
+          COMMON_OPTIONS=""
+
+          # --clean ensures that objects from the dump file will
+          # overwrite existing objects. This is critical for both modes.
+          COMMON_OPTIONS="${COMMON_OPTIONS} --clean"
+
+          # --if-exists tells pg_restore (when using --clean) to
+          # only drop objects that already exist. This prevents
+          # errors when restoring to a brand new, empty database.
+          COMMON_OPTIONS="${COMMON_OPTIONS} --if-exists"
+
+          if [ "${{ inputs.no_owner_enabled }}" = "true" ]; then
+            COMMON_OPTIONS="${COMMON_OPTIONS} --no-owner"
+          fi
+          if [ "${{ inputs.no_privileges_enabled }}" = "true" ]; then
+            COMMON_OPTIONS="${COMMON_OPTIONS} --no-privileges"
+          fi
+          if [ "${{ inputs.format }}" = "c" ]; then
+            COMMON_OPTIONS="${COMMON_OPTIONS} --format=c"
+          fi
+          if [ "${{ inputs.no_acl_enabled }}" = "true" ]; then
+            COMMON_OPTIONS="${COMMON_OPTIONS} --no-acl"
+          fi
+
+          # Then handle blobs flag separately for pg_dump only
+          DUMP_OPTIONS="${COMMON_OPTIONS}"
+          if [ "${{ inputs.blobs_enabled }}" = "true" ]; then
+            DUMP_OPTIONS="${DUMP_OPTIONS} --blobs"
+          fi
+
+          # Handle if the user want to exclude tables when dumping the database
+          if [ -n "${{ inputs.exclude_tables_from_dump }}" ]; then
+            echo "Excluding tables from dump: ${{ inputs.exclude_tables_from_dump }}"
+            for table_name in ${{ inputs.exclude_tables_from_dump }}; do
+              # We must wrap in '\"...\"' to pass literal double quotes
+              # for case-sensitive table names.
+              DUMP_OPTIONS="${DUMP_OPTIONS} --exclude-table=\"${table_name}\""
+            done
+          fi
+
+          # Exclude pghero schema as it's not data and causes version conflicts
+          DUMP_OPTIONS="${DUMP_OPTIONS} --exclude-schema=pghero"
+
+          # Use COMMON_OPTIONS for pg_restore
+          RESTORE_OPTIONS="${COMMON_OPTIONS}"
+
+          DUMP_FILE="${{ github.workspace }}-${{ inputs.source_db_host }}-${{ inputs.source_db_name }}-${{ github.run_id }}-${{ github.run_attempt }}/dump.sql"
+
+          PGPASSWORD="${{ secrets.SOURCE_DB_PASSWORD }}" \
+          pg_dump --host "${{ inputs.source_db_host }}" \
+          --port "${{ inputs.source_db_port }}" \
+          --dbname "${{ inputs.source_db_name }}" \
+          --username "${{ secrets.SOURCE_DB_USERNAME }}" \
+          --file "${DUMP_FILE}" ${DUMP_OPTIONS} || exit 1
+
+          # Check if destination database exists
+          DB_EXISTS=$(psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" -tAc "SELECT 1 FROM pg_database WHERE datname='${{ inputs.destination_db_name }}'")
+
+          if [ -z "$DB_EXISTS" ]; then
+              echo "Destination database does not exist. Creating new database..."
+              psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" \
+                  -c "CREATE DATABASE ${{ inputs.destination_db_name }};"
+          else
+              echo "Destination database exists. Preparing for restore..."
+
+              # Function to handle all database connection terminations
+              terminate_connections() {
+                  local db_name="$1"
+                  local max_attempts=3
+                  local wait_seconds=5
+
+                  for attempt in $(seq 1 $max_attempts); do
+                      echo "Attempt $attempt of $max_attempts to terminate connections..."
+
+                      # Execute all connection management commands
+                      psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" <<-EOF
+                          UPDATE pg_database SET datallowconn = false WHERE datname = '$db_name';
+                          ALTER DATABASE $db_name CONNECTION LIMIT 1;
+                          SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$db_name';
+          EOF
+
+                      # Check remaining connections
+                      local remaining=$(psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" \
+                          -tAc "SELECT COUNT(*) FROM pg_stat_activity WHERE datname = '$db_name' AND pid != pg_backend_pid();")
+
+                      if [ "$remaining" -eq "0" ]; then
+                          echo "Successfully terminated all connections"
+                          return 0
+                      fi
+
+                      echo "Waiting ${wait_seconds} seconds before next attempt..."
+                      sleep $wait_seconds
+                  done
+
+                  echo "Failed to terminate all connections after $max_attempts attempts"
+                  return 1
+              }
+
+              # Execute connection termination (required for both modes)
+              if ! terminate_connections "${{ inputs.destination_db_name }}"; then
+                  echo "Failed to prepare database for restore"
+                  exit 1
+              fi
+
+              # Check the toggle to decide whether to drop the DB or not
+              if [ "${{ inputs.skip_database_drop }}" = "true" ]; then
+                  echo "skip_database_drop=true. Database will NOT be dropped."
+
+                  echo "Re-enabling connections for restore..."
+                  psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" \
+                      -c "UPDATE pg_database SET datallowconn = true WHERE datname = '${{ inputs.destination_db_name }}';"
+
+                  echo "Proceeding to restore with --clean flag."
+              else
+                  echo "skip_database_drop=false (default). Dropping and recreating database..."
+                  psql "host=${{ inputs.destination_db_host }} port=${{ inputs.destination_db_port }} dbname=postgres user=${{ secrets.DESTINATION_DB_USERNAME }} password=${{ secrets.DESTINATION_DB_PASSWORD }}" <<-EOF
+                      DROP DATABASE IF EXISTS ${{ inputs.destination_db_name }};
+                      CREATE DATABASE ${{ inputs.destination_db_name }};
+          EOF
+              fi
+          fi
+
+          PGPASSWORD="${{ secrets.DESTINATION_DB_PASSWORD }}" \
+          pg_restore --host "${{ inputs.destination_db_host }}" \
+          --port "${{ inputs.destination_db_port }}" \
+          --dbname "${{ inputs.destination_db_name }}" \
+          --username "${{ secrets.DESTINATION_DB_USERNAME }}" \
+          ${RESTORE_OPTIONS} ${DUMP_FILE} \
+          --verbose || exit 1
+
+          # Comprehensive cleanup
+          if [ -f "${DUMP_FILE}" ]; then
+            rm -f "${DUMP_FILE}"
+          fi
+          if [ -d "${DUMP_DIR}" ]; then
+            rm -rf "${DUMP_DIR}"
+          fi
+
+      - name: Send Slack - Success
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "✅ ${{ inputs.destination_db_name }} on ${{ inputs.destination_db_host }} has been restored from ${{ inputs.source_db_name }} on ${{ inputs.source_db_host }}!"
+
+      - name: Send Slack - Add Success Reaction
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "white_check_mark"
+
+      - name: Send Slack - Failure
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "❌ Database restore failed!"
+
+      - name: Send Slack - Add Failure Reaction
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "x"

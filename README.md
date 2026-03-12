@@ -7,6 +7,7 @@ Collections of GitHub Actions Workflow (reusable).
 - [build-docker.yml](.github/workflows/build-docker-documentation.md) – Build and push Docker images with AWS ECR, SSM helpers, and optional Slack notifications.
 - [ansible-playbook-extravars.yml](.github/workflows/ansible-playbook-extravars-documentation.md) – Run an Ansible playbook with optional SSM‑provided SSH key, Vault password, and extra vars, plus Slack notifications.
 - [debezium-connectors-operations.yml](.github/workflows/debezium-connectors-operations-documentation.md) – Pause or resume a Debezium connector via its REST API using a reusable workflow call.
+- [postgresql-dump-and-restore.yml](.github/workflows/postgresql-dump-and-restore-documentation.md) – Dump a source PostgreSQL database and restore into a destination with flexible options and Slack notifications.
 
 ## Internal Workflows
 
