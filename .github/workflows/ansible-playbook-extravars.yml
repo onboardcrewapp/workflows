@@ -1,0 +1,215 @@
+# This workflow is designed to run an Ansible playbook with support for
+# - SSH key setup from AWS SSM Parameter Store
+# - Ansible Vault file password setup from AWS SSM Parameter Store
+# - Passing extra vars to the playbook
+# - Slack notifications for playbook execution status
+---
+name: "Ansible Playbook with Extra Vars"
+
+on:
+  workflow_call:
+    inputs:
+        # General build settings
+        repository_name:
+            required: true
+            type: string
+            description: "Name of the repository to build the image from"
+        environment:
+            required: true
+            type: string
+            description: "Target environment for the build (e.g. development, staging, production)"
+
+        # Ansible settings
+        ansible_ssh_enabled:
+            required: true
+            type: boolean
+            default: true
+            description: "Setup SSH key"
+        ansible_ssh_key_aws_ssm_parameter_store_path:
+            required: false
+            type: string
+            description: "AWS SSM Parameter Store path to SSH key"
+        ansible_vault_enabled:
+            required: true
+            type: boolean
+            default: false
+        ansible_vault_aws_ssm_parameter_store_path:
+            required: false
+            type: string
+            description: "AWS SSM Parameter Store path to Vault password"
+        ansible_playbook:
+            type: string
+            required: true
+        ansible_inventory_file:
+            type: string
+            required: true
+        ansible_extra_vars:
+            type: string
+            required: false
+            description: "Extra vars"
+
+        # AWS settings for fetching SSH key and Vault password
+        aws_account_id:
+            required: true
+            type: string
+            description: 'AWS Account ID where ECR repository exists'
+        aws_region:
+            required: true
+            type: string
+            default: 'ap-southeast-1'
+            description: 'AWS Region where ECR repository is located'
+
+        # Slack notification settings
+        slack_notify_enabled:
+            required: true
+            type: boolean
+            default: false
+            description: 'Enable/disable Slack notifications for build events'
+        slack_channel_id:
+            required: false
+            type: string
+            description: 'Slack channel to send build notifications to'
+
+    secrets:
+        AWS_ACCESS_KEY_ID:
+            required: true
+        AWS_SECRET_ACCESS_KEY:
+            required: true
+        SLACK_BOT_TOKEN:
+            required: false
+
+jobs:
+  ansible:
+    runs-on: [onpremise-ubuntu-general]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Send Slack - Start
+        if: ${{ inputs.slack_notify_enabled }}
+        id: "slack"
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.BIFROST_SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            username: "Ansible Deployment"
+            attachments:
+              - fallback: "Deploying Changes via Ansible on ${{ inputs.repository_name }}"
+                color: "#2eb886"
+                author_name: "${{ github.actor }}"
+                author_link: "${{ github.server_url }}/${{ github.actor }}"
+                author_icon: "${{ github.server_url }}/${{ github.actor }}.png?size=32"
+                fields:
+                  - title: "Environment"
+                    value: "${{ inputs.environment }}"
+                  - title: "Ansible Playbook"
+                    value: "${{ inputs.ansible_playbook }}"
+                  - title: "Message"
+                    value: "${{ github.event.head_commit.message }}"
+                actions:
+                  - type: "button"
+                    text: "View Deployment Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Run playbook
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+          PYTHONWARNINGS: "ignore"
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          TEMP_SSH_DIR=$(mktemp -d)
+          echo "🔧 Setting up temporary directory at $TEMP_SSH_DIR"
+
+          if [[ "${{ inputs.ansible_ssh_enabled }}" == "true" ]]; then
+            echo "🔑 Configuring SSH key..."
+            touch $TEMP_SSH_DIR/private_key
+            if ! aws ssm get-parameter --name "${{ inputs.ansible_ssh_key_aws_ssm_parameter_store_path }}" --with-decryption --query Parameter.Value --output text > $TEMP_SSH_DIR/private_key; then
+              echo "❌ Failed to fetch SSH key from SSM"
+              exit 1
+            fi
+            chmod 400 $TEMP_SSH_DIR/private_key
+            eval "$(ssh-agent -s)"
+            if ! ssh-add $TEMP_SSH_DIR/private_key; then
+              echo "❌ Failed to add SSH key"
+              exit 1
+            fi
+            echo "✅ SSH key configured successfully"
+          fi
+
+          if [[ "${{ inputs.ansible_vault_enabled }}" == "true" ]]; then
+            echo "🔐 Setting up Ansible Vault password..."
+            touch $TEMP_SSH_DIR/ansible-vault-password
+            if ! aws ssm get-parameter --name "${{ inputs.ansible_vault_aws_ssm_parameter_store_path }}" --with-decryption --query Parameter.Value --output text > $TEMP_SSH_DIR/ansible-vault-password; then
+              echo "❌ Failed to fetch Vault password from SSM"
+              exit 1
+            fi
+            export ANSIBLE_VAULT_PASSWORD_FILE=$TEMP_SSH_DIR/ansible-vault-password
+            echo "✅ Vault password configured successfully"
+          fi
+
+          echo "🎯 Running Ansible playbook..."
+          if [[ "${{ inputs.ansible_vault_enabled }}" == "true" ]]; then
+            ansible-playbook -i ${{ inputs.ansible_inventory_file }} ${{ inputs.ansible_playbook }} \
+            --extra-vars "${{ inputs.ansible_extra_vars }}" \
+            --vault-password-file $ANSIBLE_VAULT_PASSWORD_FILE
+          else
+            ansible-playbook -i ${{ inputs.ansible_inventory_file }} ${{ inputs.ansible_playbook }} \
+            --extra-vars "${{ inputs.ansible_extra_vars }}"
+          fi
+          echo "✅ Ansible playbook completed successfully"
+
+          echo "🧹 Cleaning up..."
+          if [[ "${{ inputs.ansible_ssh_enabled }}" == "true" ]]; then
+            ssh-agent -k
+          fi
+          rm -rf $TEMP_SSH_DIR
+          echo "✨ All done!"
+
+      - name: Send Slack - Success
+        if: ${{ inputs.slack_notify_enabled && success() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "✅ Ansible Playbook ran successfully!"
+
+      - name: Send Slack - Add Success Reaction
+        if: ${{ inputs.slack_notify_enabled && success() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "white_check_mark"
+
+      - name: Send Slack - Failure
+        if: ${{ inputs.slack_notify_enabled && failure() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "❌ Ansible Playbook failed!"
+
+      - name: Send Slack - Add Failure Reaction
+        if: ${{ inputs.slack_notify_enabled && failure() }}
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "x"
