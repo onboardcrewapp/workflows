@@ -8,3 +8,4 @@ Collections of GitHub Actions Workflow (reusable).
 - [internal-argocd-app-sync.yml](.github/workflows/internal-argocd-app-sync.md) – **Internal** workflow for syncing ArgoCD applications; tailored for the OnBoard Crew App team and provided as a reference only.
 - [ansible-playbook-extravars.yml](.github/workflows/ansible-playbook-extravars.md) – Run an Ansible playbook with optional SSM‑provided SSH key, Vault password, and extra vars, plus Slack notifications.
 - [debezium-connectors-operations.yml](.github/workflows/debezium-connectors-operations.md) – Pause or resume a Debezium connector via its REST API using a reusable workflow call.
+- [internal-deploy-nextjs-to-aws-s3-cloudfront.yml](.github/workflows/internal-deploy-nextjs-to-aws-s3-cloudfront-documentation.md) – **Internal** Next.js static site build and S3/CloudFront deployment with caching and Slack support.
