@@ -67,6 +67,7 @@ on:
 jobs:
   release:
     runs-on: ${{ inputs.runner }}
+    environment: ${{ inputs.argocd_app_env }}
     steps:
       - name: Send Slack - Start
         if: ${{ inputs.slack_notify_enabled }}
