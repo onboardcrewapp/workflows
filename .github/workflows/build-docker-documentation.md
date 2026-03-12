@@ -1,3 +1,4 @@
+<!-- markdownlint-disable -->
 # Build and Push Docker Image
 
 This document provides examples and guidance for using the reusable GitHub Actions workflow defined in `build-docker.yml`. The workflow is designed to build a Docker image from your repository, optionally hydrate environment files from AWS SSM, authenticate with AWS ECR, push the built image, and send Slack notifications about progress.
