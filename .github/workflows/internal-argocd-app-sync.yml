@@ -145,15 +145,20 @@ jobs:
               echo "✅ Successfully deployed ArgoCD app"
               echo "📋 Attempting to fetch application logs (errors are ignored; logs are optional)..."
 
-              # The `app logs` command is purely informational.  If it fails for any
-              # reason we do **not** want to abort the workflow, so temporarily disable
-              # errexit and handle errors manually.
+              # The `app logs` command is purely informational.  The argocd CLI
+              # occasionally emits fatal-severity messages when parsing timestamps or
+              # other stream data (e.g. `parsing time "unable" as ...`).  These do not
+              # indicate a deployment failure and should be ignored.
+              #
+              # To guarantee the step never aborts the job we temporarily disable errexit
+              # and manually handle any non-zero exit status.
               set +e
               /usr/local/bin/argocd-2.11.2 app logs --group apps --tail 60 "${{ inputs.argocd_app_name }}" 2>/dev/null || {
                 echo "⚠️ Unable to fetch logs - this could be due to:"
                 echo "   • Too many pods in the application"
                 echo "   • No logs available"
                 echo "   • Logs access restrictions"
+                echo "   • Parsing errors from the ArgoCD CLI (harmless)"
                 echo "   • Continuing with successful deployment..."
               }
               set -e
