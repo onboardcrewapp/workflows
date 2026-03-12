@@ -1,0 +1,212 @@
+# Reusable workflow for syncing ArgoCD applications with support for:
+# - ArgoCD login with retry logic
+# - Application sync with retry logic and detailed logging
+# - Slack notifications for release status updates
+#
+# This workflow is internally used by OnBoard Crew App team. We don't
+# recommend using this workflow directly in your own repositories, as we specifically
+# tailor it to our managed server configuration and release processes.
+# If you want to implement similar functionality, we recommend using this workflow as a
+# reference and creating your own version that fits your specific needs and environment.
+---
+name: "ArgoCD App Sync and Release"
+
+on:
+  workflow_call:
+    inputs:
+        # General build settings
+        repository_name:
+            required: true
+            type: string
+            description: 'Name of the repository to build the image from'
+        argocd_server_url:
+            required: true
+            type: string
+            description: 'URL of the ArgoCD server'
+        argocd_app_name:
+            required: true
+            type: string
+            description: 'Name of the ArgoCD application to sync'
+        argocd_app_env:
+            required: true
+            type: string
+            description: 'Environment to apply the built image to'
+        argocd_release_args:
+            required: true
+            type: string
+            description: 'Release arguments to pass to ArgoCD'
+        tag:
+            required: true
+            type: string
+            description: 'Tag to apply to the built image'
+        runner:
+            required: true
+            type: string
+            default: 'ubuntu-latest'
+            description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+
+        # Slack notification settings
+        slack_notify_enabled:
+            required: true
+            type: boolean
+            default: false
+            description: 'Enable/disable Slack notifications for build events'
+        slack_channel_id:
+            required: false
+            type: string
+            description: 'Slack channel to send build notifications to'
+
+    secrets:
+        ARGOCD_USERNAME:
+            required: true
+        ARGOCD_PASSWORD:
+            required: true
+        SLACK_BOT_TOKEN:
+            required: false
+
+jobs:
+  release:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Send Slack - Start
+        if: ${{ inputs.slack_notify_enabled }}
+        id: "slack"
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            username: "Argocd Release"
+            attachments:
+              - fallback: "Releasing ${{ inputs.repository_name }}."
+                color: "#2eb886"
+                author_name: "${{ github.actor }}"
+                author_link: "${{ github.server_url }}/${{ github.actor }}"
+                author_icon: "${{ github.server_url }}/${{ github.actor }}.png?size=32"
+                fields:
+                  - title: "Repository"
+                    value: "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"
+                  - title: "ArgoCD App"
+                    value: "${{ inputs.argocd_app_name }}"
+                  - title: "Docker Image Tag"
+                    value: "${{ inputs.tag }}"
+                actions:
+                  - type: "button"
+                    text: "View Release Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Release ArgoCD App
+        run: |
+          max_attempts=3
+          attempt=1
+
+          while [ $attempt -le $max_attempts ]; do
+            echo "🔐 ArgoCD login attempt $attempt of $max_attempts..."
+            if /usr/local/bin/argocd-2.11.2 login ${{ inputs.argocd_server_url }} --username ${{ secrets.ARGOCD_USERNAME }} --password ${{ secrets.ARGOCD_PASSWORD }} --grpc-web --insecure; then
+              if /usr/local/bin/argocd-2.11.2 account get-user-info | grep "Logged In: true"; then
+                echo "✅ Successfully logged in to ArgoCD"
+                break
+              fi
+            fi
+
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Failed to login to ArgoCD after $max_attempts attempts"
+              exit 1
+            fi
+
+            echo "⚠️ Login attempt $attempt failed, waiting 10 seconds before retry..."
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+
+          RELEASE_ARGS=""
+          if [ -n "${{ inputs.argocd_release_args }}" ]; then
+            echo "🔧 Processing release arguments..."
+            while IFS='=' read -r key value; do
+              RELEASE_ARGS="${RELEASE_ARGS} -p $key=$value"
+            done <<< "${{ inputs.argocd_release_args }}"
+          fi
+
+          max_attempts=3
+          attempt=1
+
+          while [ $attempt -le $max_attempts ]; do
+            echo "📦 Deploying ArgoCD app (Attempt $attempt of $max_attempts)..."
+
+            if /usr/local/bin/argocd-2.11.2 app set "${{ inputs.argocd_app_name }}" ${RELEASE_ARGS} && \
+               /usr/local/bin/argocd-2.11.2 app sync "${{ inputs.argocd_app_name }}" && \
+               /usr/local/bin/argocd-2.11.2 app wait "${{ inputs.argocd_app_name }}" --grpc-web --sync --timeout 600 && \
+               /usr/local/bin/argocd-2.11.2 app wait "${{ inputs.argocd_app_name }}" --grpc-web --operation --timeout 600 && \
+               /usr/local/bin/argocd-2.11.2 app wait "${{ inputs.argocd_app_name }}" --grpc-web --health --timeout 600; then
+
+              echo "✅ Successfully deployed ArgoCD app"
+              echo "📋 Attempting to fetch application logs (this may fail safely if no logs are available)..."
+
+              set +e
+              /usr/local/bin/argocd-2.11.2 app logs --group apps --tail 60 "${{ inputs.argocd_app_name }}" 2>/dev/null || {
+                echo "⚠️ Unable to fetch logs - this could be due to:"
+                echo "   • Too many pods in the application"
+                echo "   • No logs available"
+                echo "   • Logs access restrictions"
+                echo "   • Continuing with successful deployment..."
+              }
+              set -e
+              break
+            fi
+
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Failed to deploy ArgoCD app after $max_attempts attempts"
+              exit 1
+            fi
+
+            echo "⚠️ Deployment attempt $attempt failed, waiting 10 seconds before retry..."
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+
+
+      - name: Send Slack - Success
+        if: success()
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "✅ ArgoCD App deployment completed successfully!"
+
+      - name: Send Slack - Add Success Reaction
+        if: success()
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "white_check_mark"
+
+      - name: Send Slack - Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "❌ ArgoCD App release failed!"
+
+      - name: Send Slack - Add Failure Reaction
+        if: failure()
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "x"
