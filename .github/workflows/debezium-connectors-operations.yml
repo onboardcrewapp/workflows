@@ -1,0 +1,38 @@
+---
+name: "Basic Debezium Connectors Operations"
+
+on:
+  workflow_call:
+    inputs:
+        # Common settings
+        connector_name:
+            required: true
+            type: string
+            description: 'Name of the Debezium connector to operate on'
+        debezium_url:
+            required: true
+            type: string
+            description: 'URL of the Debezium REST API'
+        suspend_enabled:
+            required: true
+            type: boolean
+            description: 'Whether to suspend the Debezium connector'
+        runner:
+            required: true
+            type: string
+            default: 'ubuntu-latest'
+            description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+
+jobs:
+  debezium_operation:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Debezium Pause
+        if: ${{ inputs.suspend_enabled }}
+        run: |
+          curl -X PUT ${{ inputs.debezium_url }}/connectors/${{ inputs.connector_name }}/pause
+
+      - name: Debezium Resume
+        if: ${{ !inputs.suspend_enabled }}
+        run: |
+          curl -X PUT ${{ inputs.debezium_url }}/connectors/${{ inputs.connector_name }}/resume
