@@ -1,0 +1,551 @@
+# This GitHub Actions workflow builds a Next.js static site with support for
+# - Caching node_modules and Next.js build artifacts to speed up subsequent builds
+# - Generating .env files from AWS SSM Parameter Store
+# - Deploying the static site to AWS S3 and invalidating CloudFront cache
+# - Slack notifications for build events
+#
+# This workflow is internally used by OnBoard Crew App team. We don't
+# recommend using this workflow directly in your own repositories, as we specifically
+# tailor it to our managed server configuration and release processes.
+# If you want to implement similar functionality, we recommend using this workflow as a
+# reference and creating your own version that fits your specific needs and environment.
+#
+# The implementation focusing on using self-hosted runner that enhance local disk file system
+# to cache node_modules and Next.js build artifacts, which significantly reduces build times for subsequent runs.
+name: 'Build Next.js Static Site and Deploy to AWS S3 with CloudFront Invalidation'
+
+on:
+  workflow_call:
+    inputs:
+        # General build settings
+        repository_name:
+            required: true
+            type: string
+            description: 'Name of the repository to build the image from'
+        node_version:
+            required: true
+            type: string
+        node_package_manager:
+            required: false
+            type: string
+            default: 'auto'
+            description: 'Node.js package manager to use (auto/yarn/npm). Auto will detect based on lock files'
+        node_frozen_lockfile:
+            required: false
+            type: boolean
+            default: true
+            description: 'Use frozen lockfile for package installation (--frozen-lockfile for yarn, --ci for npm)'
+        node_env:
+            required: false
+            type: string
+            default: 'production'
+        runner:
+            required: true
+            type: string
+            default: 'ubuntu-latest'
+            description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+
+        # AWS settings
+        aws_account_id:
+            required: true
+            type: string
+            description: 'AWS Account ID where ECR repository exists'
+        aws_region:
+            required: true
+            type: string
+            default: 'ap-southeast-1'
+            description: 'AWS Region where ECR repository is located'
+        aws_ssm_generate_env_file_enabled:
+            required: true
+            type: boolean
+            default: false
+            description: 'Enable/disable .env file generation from AWS SSM parameters'
+        aws_ssm_parameter_prefix:
+            required: false
+            type: string
+            description: 'Prefix path for AWS SSM parameters to generate .env file'
+        aws_ssm_parameter_prefix_custom_env_filename:
+            required: false
+            type: string
+            description: 'Custom filename for the generated environment file (default: .env)'
+        aws_ssm_parameter_prefix_env_directory:
+            required: false
+            type: string
+            description: 'Directory path for the generated environment file (default: current directory)'
+        aws_s3_bucket:
+            required: true
+            type: string
+            description: 'Name of the S3 bucket to deploy the static site to'
+        aws_cloudfront_distribution_id:
+            required: true
+            type: string
+            description: 'ID of the CloudFront distribution to invalidate after deployment'
+
+        # Slack notification settings
+        slack_notify_enabled:
+            required: true
+            type: boolean
+            default: false
+            description: 'Enable/disable Slack notifications for build events'
+        slack_channel_id:
+            required: false
+            type: string
+            description: 'Slack channel to send build notifications to'
+
+        # Build commands
+        build_command:
+            required: false
+            type: string
+            description: 'Command to run to build the application'
+        deploy_command:
+            required: false
+            type: string
+            description: 'Command to run to deploy the application'
+
+        # Build cache settings
+        cache_base_directory:
+            required: false
+            type: string
+            default: '/tmp/bifrost-cache'
+            description: 'Base directory for build and dependency caches'
+
+    secrets:
+        AWS_ACCESS_KEY_ID:
+            required: true
+        AWS_SECRET_ACCESS_KEY:
+            required: true
+        SLACK_BOT_TOKEN:
+            required: false
+        FIREBASE_TOKEN:
+            required: false
+        CERT_PASSWORD:
+            required: false
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Send Slack - Start
+        if: ${{ inputs.slack_notify_enabled }}
+        id: 'slack'
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            username: "Build Next.js and Deploy to AWS S3"
+            attachments:
+              - fallback: "Building ${{ inputs.repository_name }}."
+                color: "#2eb886"
+                author_name: "${{ github.actor }}"
+                author_link: "${{ github.server_url }}/${{ github.actor }}"
+                author_icon: "${{ github.server_url }}/${{ github.actor }}.png?size=32"
+                fields:
+                  - title: "Repository"
+                    value: "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"
+                  - title: "Branch"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}|${{ github.ref_name }}>"
+                  - title: "Head"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.head_commit.id }}|${{ github.event.head_commit.id }}>"
+                  - title: "Message"
+                    value: "${{ github.event.head_commit.message }}"
+                actions:
+                  - type: "button"
+                    text: "View Build Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Install Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Generate Cache Keys
+        id: cache-keys
+        run: |
+          NODE_VERSION_HASH=$(echo "${{ inputs.node_version }}" | md5sum | cut -d ' ' -f1)
+
+          if [ -f "yarn.lock" ]; then
+            echo "node_deps_hash=${NODE_VERSION_HASH}_$(md5sum yarn.lock | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          elif [ -f "package-lock.json" ]; then
+            echo "node_deps_hash=${NODE_VERSION_HASH}_$(md5sum package-lock.json | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          else
+            echo "node_deps_hash=${NODE_VERSION_HASH}_$(md5sum package.json | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -f "Gemfile.lock" ]; then
+            echo "gem_bundler_hash=$(md5sum Gemfile.lock | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          else
+            echo "gem_bundler_hash=$(md5sum Gemfile | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate .env file from AWS SSM Parameter Store
+        if: ${{ inputs.aws_ssm_generate_env_file_enabled }}
+        env:
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          ENV_DIR="${{ inputs.aws_ssm_parameter_prefix_env_directory || '.' }}"
+          ENV_FILE="${ENV_DIR}/${{ inputs.aws_ssm_parameter_prefix_custom_env_filename || '.env' }}"
+
+          echo "🗑️ Cleaning up existing env files..."
+          mkdir -p "$ENV_DIR"
+          rm -f "$ENV_FILE"*
+
+          max_attempts=3
+          attempt=1
+
+          while [ $attempt -le $max_attempts ]; do
+            echo "⚙️ Generating .env file (Attempt $attempt of $max_attempts)..."
+            if aws ssm get-parameters-by-path \
+              --path "${{ inputs.aws_ssm_parameter_prefix }}" \
+              --recursive \
+              --with-decryption \
+              --query "Parameters[*].{Name:Name,Value:Value}" \
+              --output json | jq -r --arg SSM_ENV "${{ inputs.aws_ssm_parameter_prefix }}" \
+              '.[] | "\(.Name | sub($SSM_ENV + "/"; ""))=\(.Value)"' > "$ENV_FILE"; then
+
+              # In the Generate .env file from AWS SSM Parameter Store step
+              # Verify the ENV_FILE, not just .env
+              if [ -s "$ENV_FILE" ]; then
+                total_lines=$(wc -l < "$ENV_FILE")
+                echo "✅ Environment file generated successfully with configuration data"
+                echo "🔢 Total lines: $total_lines"
+                break
+              fi
+            fi
+
+            if [ $attempt -eq $max_attempts ]; then
+              echo "❌ Failed to generate environment file after $max_attempts attempts"
+              exit 1
+            fi
+
+            echo "⚠️ Attempt $attempt failed, waiting 10 seconds before retry..."
+            sleep 10
+            attempt=$((attempt + 1))
+          done
+
+      - name: NPM/Yarn Install with Cache
+        env:
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+        run: |
+          CACHE_DIR="${{ inputs.cache_base_directory }}/${{ inputs.repository_name }}/${{ steps.cache-keys.outputs.node_deps_hash }}"
+          NODE_CACHE="$CACHE_DIR/node"
+          BUILD_CACHE="$CACHE_DIR/build"
+
+          mkdir -p $NODE_CACHE
+          mkdir -p $BUILD_CACHE
+
+          if [ -d "$NODE_CACHE/node_modules" ]; then
+            echo "📦 Restoring node_modules from cache..."
+            ln -sf $NODE_CACHE/node_modules ./node_modules
+          fi
+
+          # Restore Next.js build cache if exists
+          if [ -d "$BUILD_CACHE/.next" ]; then
+            echo "📦 Restoring Next.js build cache..."
+            mkdir -p ./.next
+            cp -r $BUILD_CACHE/.next/* ./.next/
+          fi
+
+          if [ -d "$BUILD_CACHE/out" ]; then
+            echo "📦 Restoring static export from cache..."
+            mkdir -p ./out
+            cp -r $BUILD_CACHE/out/* ./out/
+          fi
+
+          # Install dependencies
+          if [ "${{ inputs.node_package_manager }}" = "yarn" ]; then
+            if ! command -v yarn &> /dev/null; then
+              npm install -g yarn
+            fi
+            yarn install ${{ inputs.node_frozen_lockfile && '--frozen-lockfile' || '' }}
+          elif [ "${{ inputs.node_package_manager }}" = "npm" ]; then
+            npm ${{ inputs.node_frozen_lockfile && 'ci' || 'install' }}
+          else
+            if [ -f yarn.lock ]; then
+              if ! command -v yarn &> /dev/null; then
+                npm install -g yarn
+              fi
+              yarn install ${{ inputs.node_frozen_lockfile && '--frozen-lockfile' || '' }}
+            elif [ -f package-lock.json ]; then
+              npm ${{ inputs.node_frozen_lockfile && 'ci' || 'install' }}
+            fi
+          fi
+
+      - name: Build Next.js Static Site
+        env:
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          NODE_ENV: ${{ inputs.node_env || 'production' }}
+        run: |
+          echo "🏗️ Building Next.js static site..."
+          max_build_attempts=3
+          build_attempt=1
+          build_success=false
+
+          while [ $build_attempt -le $max_build_attempts ] && [ "$build_success" = "false" ]; do
+            echo "🔄 Executing build (Attempt $build_attempt of $max_build_attempts)..."
+
+            if [ ! -z "${{ inputs.build_command }}" ]; then
+              echo "${{ inputs.build_command }}" > build_command.sh
+              chmod +x build_command.sh
+
+              if ./build_command.sh; then
+                build_success=true
+                echo "✅ Build completed successfully!"
+              else
+                build_exit_code=$?
+                echo "⚠️ Build attempt $build_attempt failed with exit code $build_exit_code"
+
+                if [ $build_attempt -eq $max_build_attempts ]; then
+                  echo "❌ All build attempts failed. Giving up after $max_build_attempts attempts."
+                  exit $build_exit_code
+                else
+                  echo "🕒 Waiting 15 seconds before retry..."
+                  sleep 15
+                fi
+              fi
+            else
+              echo "ℹ️ No build command specified. Running default Next.js static export..."
+              if npm run build && npm run export; then
+                build_success=true
+                echo "✅ Default build completed successfully!"
+              else
+                build_exit_code=$?
+                echo "⚠️ Default build attempt $build_attempt failed with exit code $build_exit_code"
+
+                if [ $build_attempt -eq $max_build_attempts ]; then
+                  echo "❌ All build attempts failed. Giving up after $max_build_attempts attempts."
+                  exit $build_exit_code
+                else
+                  echo "🕒 Waiting 15 seconds before retry..."
+                  sleep 15
+                fi
+              fi
+            fi
+
+            build_attempt=$((build_attempt + 1))
+          done
+
+      - name: Deploy AWS S3 and CloudFront
+        env:
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          AWS_S3_BUCKET: ${{ inputs.aws_s3_bucket }}
+          AWS_CLOUDFRONT_DISTRIBUTION_ID: ${{ inputs.aws_cloudfront_distribution_id }}
+          NODE_ENV: ${{ inputs.node_env || 'production' }}
+        run: |
+          CACHE_DIR="${{ inputs.cache_base_directory }}/${{ inputs.repository_name }}/${{ steps.cache-keys.outputs.node_deps_hash }}"
+          NODE_CACHE="$CACHE_DIR/node"
+          BUILD_CACHE="$CACHE_DIR/build"
+
+          echo "⚙️ Running deploy commands..."
+
+          # Setup retry logic for deploy command
+          max_deploy_attempts=3
+          deploy_attempt=1
+          deploy_success=false
+
+          while [ $deploy_attempt -le $max_deploy_attempts ] && [ "$deploy_success" = "false" ]; do
+            echo "🔄 Executing deploy (Attempt $deploy_attempt of $max_deploy_attempts)..."
+
+            if [ ! -z "${{ inputs.deploy_command }}" ]; then
+              echo "${{ inputs.deploy_command }}" > deploy_command.sh
+              chmod +x deploy_command.sh
+
+              if ./deploy_command.sh; then
+                deploy_success=true
+                echo "✅ Deploy completed successfully!"
+              else
+                deploy_exit_code=$?
+                echo "⚠️ Deploy attempt $deploy_attempt failed with exit code $deploy_exit_code"
+
+                if [ $deploy_attempt -eq $max_deploy_attempts ]; then
+                  echo "❌ All deploy attempts failed. Giving up after $max_deploy_attempts attempts."
+                  exit $deploy_exit_code
+                else
+                  echo "🕒 Waiting 15 seconds before retry..."
+                  sleep 15
+                fi
+              fi
+            else
+              echo "ℹ️ No deploy command specified. Skipping custom deploy step."
+              deploy_success=true
+            fi
+
+            deploy_attempt=$((deploy_attempt + 1))
+          done
+
+          if [ "$deploy_success" = "true" ] && [ -z "${{ inputs.deploy_command }}" ]; then
+            if [ -d "./out" ]; then
+              echo "🚀 Deploying to S3 using default method..."
+
+              # First, get the actual size of the out directory
+              OUT_SIZE=$(du -sh ./out | cut -f1)
+              echo "📊 Actual size of out directory: $OUT_SIZE"
+
+              # Count files to be uploaded
+              FILE_COUNT=$(find ./out -type f | wc -l)
+              echo "📊 Number of files to upload: $FILE_COUNT"
+
+              # Step 1: Pre-deployment CloudFront invalidation
+              echo "🔄 Starting pre-deployment CloudFront cache invalidation..."
+              max_cf_pre_attempts=3
+              cf_pre_attempt=1
+              cf_pre_success=false
+
+              while [ $cf_pre_attempt -le $max_cf_pre_attempts ] && [ "$cf_pre_success" = "false" ]; do
+                echo "🔄 Executing pre-deployment CloudFront invalidation (Attempt $cf_pre_attempt of $max_cf_pre_attempts)..."
+
+                if aws cloudfront create-invalidation --distribution-id $AWS_CLOUDFRONT_DISTRIBUTION_ID --paths "/*"; then
+                  cf_pre_success=true
+                  echo "✅ Pre-deployment CloudFront invalidation started successfully!"
+                else
+                  cf_pre_exit_code=$?
+                  echo "⚠️ Pre-deployment CloudFront invalidation attempt $cf_pre_attempt failed with exit code $cf_pre_exit_code"
+
+                  if [ $cf_pre_attempt -eq $max_cf_pre_attempts ]; then
+                    echo "❌ All pre-deployment CloudFront invalidation attempts failed. Giving up after $max_cf_pre_attempts attempts."
+                    exit $cf_pre_exit_code
+                  else
+                    echo "🕒 Waiting 15 seconds before retry..."
+                    sleep 15
+                  fi
+                fi
+
+                cf_pre_attempt=$((cf_pre_attempt + 1))
+              done
+
+              # Step 2: Deploy to S3
+              echo "📤 Uploading files to S3..."
+              # Use --no-progress to avoid the potentially misleading progress bar
+              aws s3 sync ./out s3://$AWS_S3_BUCKET/ --delete --no-progress --only-show-errors
+              s3_exit_code=$?
+
+              if [ $s3_exit_code -eq 0 ]; then
+                echo "✅ S3 deployment completed successfully!"
+                echo "📊 Uploaded $FILE_COUNT files (approximately $OUT_SIZE) to S3 bucket: $AWS_S3_BUCKET"
+                # Don't reassign deploy_success here, it should remain "true"
+              else
+                echo "❌ S3 deployment failed!"
+                exit $s3_exit_code
+              fi
+            else
+              echo "❌ Error: No 'out' directory found to deploy. Did the build step complete correctly?"
+              exit 1
+            fi
+          fi
+
+                      # Only run post-deployment CloudFront invalidation if deployment was successful
+            if [ "$deploy_success" = "true" ]; then
+              echo "🔄 Starting post-deployment CloudFront cache invalidation..."
+              max_cf_post_attempts=3
+              cf_post_attempt=1
+              cf_post_success=false
+
+              while [ $cf_post_attempt -le $max_cf_post_attempts ] && [ "$cf_post_success" = "false" ]; do
+                echo "🔄 Executing post-deployment CloudFront invalidation (Attempt $cf_post_attempt of $max_cf_post_attempts)..."
+
+                 if aws cloudfront create-invalidation --distribution-id $AWS_CLOUDFRONT_DISTRIBUTION_ID --paths "/*"; then
+                      cf_post_success=true
+                    echo "✅ Post-deployment CloudFront invalidation started successfully!"
+                else
+                  cf_post_exit_code=$?
+                  echo "⚠️ Post-deployment CloudFront invalidation attempt $cf_post_attempt failed with exit code $cf_post_exit_code"
+
+                  if [ $cf_post_attempt -eq $max_cf_post_attempts ]; then
+                    echo "❌ All post-deployment CloudFront invalidation attempts failed. Giving up after $max_cf_post_attempts attempts."
+                    exit $cf_post_exit_code
+                  else
+                    echo "🕒 Waiting 15 seconds before retry..."
+                    sleep 15
+                  fi
+                fi
+
+                cf_post_attempt=$((cf_post_attempt + 1))
+              done
+            else
+              echo "❌ Skipping CloudFront invalidation due to failed deployment"
+              exit 1
+            fi
+
+          echo "📦 Updating build caches..."
+
+          if [ -d "./node_modules" ]; then
+            echo "📦 Updating node_modules cache..."
+            rm -rf $NODE_CACHE/node_modules
+            mkdir -p $NODE_CACHE
+            cp -r ./node_modules $NODE_CACHE/
+          fi
+
+          if [ -d "./.next" ]; then
+            echo "📦 Updating Next.js build cache..."
+            rm -rf $BUILD_CACHE/.next
+            mkdir -p $BUILD_CACHE/.next
+            cp -r ./.next/* $BUILD_CACHE/.next/
+          fi
+
+          if [ -d "./out" ]; then
+            echo "📦 Updating static export cache..."
+            rm -rf $BUILD_CACHE/out
+            mkdir -p $BUILD_CACHE/out
+            cp -r ./out/* $BUILD_CACHE/out/
+          fi
+
+      - name: Send Slack - Success
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "✅ Next.js static build completed successfully!"
+
+      - name: Send Slack - Add Success Reaction
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "white_check_mark"
+
+      - name: Send Slack - Failure
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts }}
+            text: "❌ Next.js static build failed!"
+
+      - name: Send Slack - Add Failure Reaction
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts }}
+            name: "x"
