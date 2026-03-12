@@ -24,7 +24,8 @@ temporary failures.
    health), each with a 10‑minute timeout and retry wrapper. The job also sets the GitHub
    `environment` attribute to the value of the `argocd_app_env` input so that deployments
    are properly scoped.
-5. Attempt to fetch the last 60 lines of application logs (failure is tolerated).
+5. Attempt to fetch the last 60 lines of application logs (failure is tolerated –
+   errors are explicitly ignored so this step never causes the job to fail).
 6. Send a Slack notification on success or failure, along with a reaction emoji.
 
 Because the workflow uses a pinned `argocd-2.11.2` binary path and assumes specific network
