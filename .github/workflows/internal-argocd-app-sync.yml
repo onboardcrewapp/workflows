@@ -44,6 +44,10 @@ on:
             type: string
             default: 'ubuntu-latest'
             description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+        github_environment:
+            required: true
+            type: string
+            description: 'GitHub environment to deploy to (e.g. staging, production)'
 
         # Slack notification settings
         slack_notify_enabled:
@@ -67,7 +71,7 @@ on:
 jobs:
   release:
     runs-on: ${{ inputs.runner }}
-    environment: ${{ inputs.argocd_app_env }}
+    environment: ${{ inputs.github_environment }}
     steps:
       - name: Send Slack - Start
         if: ${{ inputs.slack_notify_enabled }}
