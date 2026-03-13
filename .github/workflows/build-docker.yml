@@ -116,7 +116,8 @@ jobs:
         id: prepare_message
         run: |
           COMMIT_MSG="${{ github.event.head_commit.message }}"
-          NO_NEWLINES_MSG=$(echo "$COMMIT_MSG" | tr '\n' ' ')
+
+          NO_NEWLINES_MSG=$(echo "$COMMIT_MSG" | tr -d '\r' | tr '\n' ' ')
           ORIGINAL_LENGTH=${#NO_NEWLINES_MSG}
           TRUNCATED_MSG=$(echo "$NO_NEWLINES_MSG" | head -c 500)
 
@@ -126,9 +127,10 @@ jobs:
 
           TRUNCATED_MSG=$(echo "$TRUNCATED_MSG" | sed 's/"/\\"/g')
 
-          echo "truncated_message<<EOF" >> $GITHUB_OUTPUT
-          echo -n "$TRUNCATED_MSG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Ensure the value written to GITHUB_OUTPUT is terminated by a newline so the closing delimiter is recognized.
+          echo "truncated_message<<EOF" >> "$GITHUB_OUTPUT"
+          printf '%s\n' "$TRUNCATED_MSG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
 
       - name: Send Slack - Start
         if: ${{ inputs.slack_notify_enabled }}
