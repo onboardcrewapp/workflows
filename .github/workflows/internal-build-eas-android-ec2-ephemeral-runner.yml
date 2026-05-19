@@ -1,0 +1,831 @@
+---
+name: "Build EAS Android Local with EC2 Ephemeral Runner"
+
+on:
+  workflow_call:
+    inputs:
+      # Common settings
+      repository_name:
+        required: true
+        type: string
+        description: "Name of the repository to build the image from"
+      node_version:
+        required: true
+        type: string
+        default: "20"
+      eas_version:
+        required: true
+        type: string
+      node_package_manager:
+        required: false
+        type: string
+        default: "auto"
+        description: "Node.js package manager to use (auto/yarn/npm). Auto will detect based on lock files"
+      node_frozen_lockfile:
+        required: false
+        type: boolean
+        default: true
+        description: "Use frozen lockfile for package installation (--frozen-lockfile for yarn, --ci for npm)"
+      java_version:
+        required: false
+        type: string
+        default: "21"
+        description: "Java version to use for the build (e.g. 8, 11, 17)"
+      firebase_cli_enabled:
+        required: false
+        type: boolean
+        default: false
+        description: "Install Firebase CLI locally as devDependency"
+      firebase_cli_version:
+        required: false
+        type: string
+        default: "latest"
+        description: "Firebase CLI version to install (e.g. latest, 12.4.0)"
+      # build_timeout:
+      #   required: false
+      #   type: number
+      #   default: 40
+      build_attempts:
+        required: false
+        type: string
+        default: "3"
+      retry_wait_time:
+        required: false
+        type: string
+        default: "60"
+
+      # Runner selection
+      runner:
+        required: true
+        type: string
+        description: "Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)"
+
+      # AWS settings
+      aws_region:
+        required: true
+        type: string
+        default: "ap-southeast-1"
+        description: "AWS Region where ECR repository is located"
+
+      # Slack notification settings
+      slack_notify_enabled:
+        required: true
+        type: boolean
+        default: false
+        description: "Enable/disable Slack notifications for build events"
+      slack_channel_id:
+        required: false
+        type: string
+        description: "Slack channel to send build notifications to"
+
+      # EAS specific settings
+      android_sdk_platform:
+        required: false
+        type: string
+        description: "Android SDK platform to use for building the image"
+        default: "16.0"
+      android_cmdline_tools_version:
+        required: false
+        type: string
+        description: "Android SDK Command-line Tools version or latest"
+        default: "latest"
+      android_ndk_version:
+        required: false
+        type: string
+        description: "Android NDK version to use for building the image"
+        default: "23.1.7779620"
+      eas_build_profile:
+        required: false
+        type: string
+        description: "EAS build profile to use (e.g. development, preview, production)"
+        default: "preview"
+      build_commands:
+        required: true
+        type: string
+        description: "EAS build command to execute (e.g. eas build --local --platform android)"
+
+      # Build artifacts settings
+      s3_upload_artifacts_enabled:
+        required: false
+        type: boolean
+        description: "Enable/disable uploading build artifacts to S3"
+        default: false
+      s3_build_artifacts_bucket:
+        required: false
+        type: string
+        description: "S3 bucket to store build artifacts in"
+      s3_upload_timeout:
+        required: false
+        type: string
+        default: "10"
+        description: "Timeout in minutes for S3 upload"
+      s3_upload_attempts:
+        required: false
+        type: string
+        default: "3"
+        description: "Number of retry attempts for S3 upload"
+      s3_upload_retry_wait_time:
+        required: false
+        type: string
+        default: "30"
+        description: "Wait time in seconds between S3 upload retry attempts"
+
+      # Firebase App Distribution settings
+      firebase_app_distribution_enabled:
+        required: false
+        type: boolean
+        description: "Enable/disable Firebase App Distribution"
+        default: false
+      firebase_app_id:
+        required: false
+        type: string
+        description: "Firebase App ID (format: 1:1234567890:android:0a1b2c3d4e5f67890)"
+      firebase_release_notes:
+        required: false
+        type: string
+        description: "Release notes for the distribution"
+        default: "New build from CI/CD pipeline"
+      firebase_testers:
+        required: false
+        type: string
+        description: "Comma-separated list of tester email addresses"
+      firebase_testers_file:
+        required: false
+        type: string
+        description: "Path to file containing tester email addresses (one per line)"
+      firebase_groups:
+        required: false
+        type: string
+        description: "Comma-separated list of tester group aliases"
+      firebase_distribution_timeout:
+        required: false
+        type: string
+        default: "10"
+        description: "Timeout in minutes for Firebase distribution"
+      firebase_distribution_attempts:
+        required: false
+        type: string
+        default: "3"
+        description: "Number of retry attempts for Firebase distribution"
+      firebase_distribution_retry_wait_time:
+        required: false
+        type: string
+        default: "30"
+        description: "Wait time in seconds between Firebase distribution retry attempts"
+
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+      SLACK_BOT_TOKEN:
+        required: false
+      FIREBASE_TOKEN:
+        required: false
+      EXPO_TOKEN:
+        required: true
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    steps:
+      - name: Validate Required Inputs
+        env:
+          SLACK_NOTIFY_ENABLED: ${{ inputs.slack_notify_enabled }}
+          SLACK_CHANNEL_ID: ${{ inputs.slack_channel_id }}
+          S3_UPLOAD_ARTIFACTS_ENABLED: ${{ inputs.s3_upload_artifacts_enabled }}
+          S3_BUILD_ARTIFACTS_BUCKET: ${{ inputs.s3_build_artifacts_bucket }}
+          FIREBASE_APP_DISTRIBUTION_ENABLED: ${{ inputs.firebase_app_distribution_enabled }}
+          FIREBASE_APP_ID: ${{ inputs.firebase_app_id }}
+          FIREBASE_TESTERS: ${{ inputs.firebase_testers }}
+          FIREBASE_TESTERS_FILE: ${{ inputs.firebase_testers_file }}
+          FIREBASE_GROUPS: ${{ inputs.firebase_groups }}
+        run: |
+          # Validate Slack parameters when enabled
+          if [ "$SLACK_NOTIFY_ENABLED" = "true" ] && [ -z "$SLACK_CHANNEL_ID" ]; then
+            echo "❌ Error: slack_channel_id is required when slack_notify_enabled is true"
+            exit 1
+          fi
+
+          # Validate S3 parameters when enabled
+          if [ "$S3_UPLOAD_ARTIFACTS_ENABLED" = "true" ] && [ -z "$S3_BUILD_ARTIFACTS_BUCKET" ]; then
+            echo "❌ Error: s3_build_artifacts_bucket is required when s3_upload_artifacts_enabled is true"
+            exit 1
+          fi
+
+          # Validate Firebase App Distribution parameters when enabled
+          if [ "$FIREBASE_APP_DISTRIBUTION_ENABLED" = "true" ]; then
+            if [ -z "$FIREBASE_APP_ID" ]; then
+              echo "❌ Error: firebase_app_id is required when firebase_app_distribution_enabled is true"
+              exit 1
+            fi
+            if [ -z "$FIREBASE_TESTERS" ] && [ -z "$FIREBASE_TESTERS_FILE" ] && [ -z "$FIREBASE_GROUPS" ]; then
+              echo "❌ Error: At least one of firebase_testers, firebase_testers_file, or firebase_groups is required when firebase_app_distribution_enabled is true"
+              exit 1
+            fi
+          fi
+
+          echo "✅ All required inputs validated successfully"
+
+      - name: Checkout Code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Send Slack - Start
+        if: ${{ inputs.slack_notify_enabled }}
+        id: "slack"
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            username: "EAS Local Build"
+            attachments:
+              - fallback: "Building ${{ inputs.repository_name }} with EAS Local."
+                color: "#2eb886"
+                author_name: "${{ github.actor }}"
+                author_link: "${{ github.server_url }}/${{ github.actor }}"
+                author_icon: "${{ github.server_url }}/${{ github.actor }}.png?size=32"
+                fields:
+                  - title: "Repository"
+                    value: "<${{ github.server_url }}/${{ github.repository }}|${{ github.repository }}>"
+                  - title: "Branch"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/tree/${{ github.ref_name }}|${{ github.ref_name }}>"
+                  - title: "Head"
+                    value: "<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.event.head_commit.id }}|${{ github.event.head_commit.id }}>"
+                  - title: "Message"
+                    value: "${{ github.event.head_commit.message }}"
+                  - title: "Build Profile"
+                    value: "${{ inputs.eas_build_profile }}"
+                actions:
+                  - type: "button"
+                    text: "View Build Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Install Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: ${{ inputs.node_version }}
+
+      - name: Install Java
+        uses: actions/setup-java@99b8673ff64fbf99d8d325f52d9a5bdedb8483e9 # v4.2.1
+        with:
+          distribution: "temurin"
+          java-version: ${{ inputs.java_version }}
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@13f81365a437096ca29f87b1e7389bf0ea1385ed # v3.0.0
+        with:
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: "platform-tools"
+        #   cmdline-tools-version: ${{ inputs.android_cmdline_tools_version }}
+        #   packages: |
+        #     platform-tools
+
+      # - run: sdkmanager --channel=3 emulator
+      # - run: sdkmanager tools
+
+      - name: Install Android NDK
+        run: |
+          export PATH=$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin:$ANDROID_HOME/tools/bin:$PATH
+          which sdkmanager
+          sdkmanager --install "ndk;${{ inputs.android_ndk_version }}" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ inputs.android_ndk_version }}" >> $GITHUB_ENV
+
+      - name: Generate Cache Keys
+        id: cache-keys
+        run: |
+          # Generate dependency hash
+          if [ -f "yarn.lock" ]; then
+            echo "node_deps_hash=$(md5sum yarn.lock | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          elif [ -f "package-lock.json" ]; then
+            echo "node_deps_hash=$(md5sum package-lock.json | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          else
+            echo "node_deps_hash=$(md5sum package.json | cut -d ' ' -f1)" >> $GITHUB_OUTPUT
+          fi
+
+          # Generate source code hash (excluding node_modules, build artifacts, and common ignore patterns)
+          echo "🔍 Generating source code hash..."
+          SOURCE_HASH=$(find . -type f \( -name "*.js" -o -name "*.jsx" -o -name "*.ts" -o -name "*.tsx" -o -name "*.json" -o -name "*.yaml" -o -name "*.yml" -o -name "*.md" -o -name "*.txt" -o -name "*.xml" -o -name "*.gradle" -o -name "*.kt" -o -name "*.java" -o -name "*.swift" -o -name "*.m" -o -name "*.h" -o -name "*.cpp" -o -name "*.c" \) \
+            -not -path "./node_modules/*" \
+            -not -path "./build/*" \
+            -not -path "./dist/*" \
+            -not -path "./.git/*" \
+            -not -path "./.github/*" \
+            -not -path "./.expo/*" \
+            -not -path "./android/*" \
+            -not -path "./ios/*" \
+            -not -path "./.next/*" \
+            -not -path "./.nuxt/*" \
+            -not -path "./coverage/*" \
+            -not -path "./.nyc_output/*" \
+            -exec md5sum {} \; | sort | md5sum | cut -d ' ' -f1)
+
+          echo "source_hash=$SOURCE_HASH" >> $GITHUB_OUTPUT
+
+          # Generate branch/tag-based cache key
+          # Handle different ref types: branches, tags, releases
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            # Tag reference (e.g., v1.0.0)
+            REF_TYPE="tag"
+            REF_NAME=$(echo "${{ github.ref }}" | sed 's|refs/tags/||')
+          elif [[ "${{ github.ref }}" == refs/heads/* ]]; then
+            # Branch reference (e.g., main, feature/xyz)
+            REF_TYPE="branch"
+            REF_NAME=$(echo "${{ github.ref }}" | sed 's|refs/heads/||')
+          else
+            # Fallback for other ref types (e.g., pull requests)
+            REF_TYPE="other"
+            REF_NAME="${{ github.ref_name }}"
+          fi
+
+          # Sanitize ref name for use in file paths (replace problematic characters)
+          SANITIZED_REF_NAME=$(echo "$REF_NAME" | sed 's/[^a-zA-Z0-9._-]/_/g')
+
+          echo "ref_type=$REF_TYPE" >> $GITHUB_OUTPUT
+          echo "ref_name=$REF_NAME" >> $GITHUB_OUTPUT
+          echo "sanitized_ref_name=$SANITIZED_REF_NAME" >> $GITHUB_OUTPUT
+
+          # Generate combined cache key with branch/tag context
+          COMBINED_HASH=$(echo "${SANITIZED_REF_NAME}_${SOURCE_HASH}_${node_deps_hash}" | md5sum | cut -d ' ' -f1)
+          echo "combined_hash=$COMBINED_HASH" >> $GITHUB_OUTPUT
+
+          echo "📊 Cache keys generated:"
+          echo "  - Reference type: $REF_TYPE"
+          echo "  - Reference name: $REF_NAME"
+          echo "  - Sanitized ref: $SANITIZED_REF_NAME"
+          echo "  - Dependencies: $node_deps_hash"
+          echo "  - Source code: $SOURCE_HASH"
+          echo "  - Combined: $COMBINED_HASH"
+
+      - name: Cache Node Modules
+        id: node-modules-cache
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-modules-${{ steps.cache-keys.outputs.node_deps_hash }}
+
+      - name: NPM/Yarn Install
+        if: steps.node-modules-cache.outputs.cache-hit != 'true'
+        env:
+          NODE_PACKAGE_MANAGER: ${{ inputs.node_package_manager }}
+          NODE_FROZEN_LOCKFILE: ${{ inputs.node_frozen_lockfile }}
+        run: |
+          echo "🔄 Installing dependencies (no cache found or dependencies changed)..."
+          if [ "$NODE_PACKAGE_MANAGER" = "yarn" ]; then
+            if ! command -v yarn &> /dev/null; then
+              npm install -g yarn
+            fi
+            yarn install ${NODE_FROZEN_LOCKFILE == 'true' && '--frozen-lockfile' || ''}
+          elif [ "$NODE_PACKAGE_MANAGER" = "npm" ]; then
+            npm ${NODE_FROZEN_LOCKFILE == 'true' && 'ci' || 'install'}
+          else
+            if [ -f yarn.lock ]; then
+              if ! command -v yarn &> /dev/null; then
+                npm install -g yarn
+              fi
+              yarn install ${NODE_FROZEN_LOCKFILE == 'true' && '--frozen-lockfile' || ''}
+            elif [ -f package-lock.json ]; then
+              npm ${NODE_FROZEN_LOCKFILE == 'true' && 'ci' || 'install'}
+            fi
+          fi
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8.2.1
+        with:
+          eas-version: ${{ inputs.eas_version }}
+          eas-cache: false
+          token: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Configure Hermes for ARM hosts
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "🔎 Host system: $(uname -s) $(uname -m)"
+
+          ARCH=$(uname -m | tr '[:upper:]' '[:lower:]')
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+
+          # Only attempt special handling on ARM hosts
+          if [[ "$ARCH" != "aarch64" && "$ARCH" != "arm64" ]]; then
+            echo "✅ Non-ARM host detected, no Hermes override needed"
+            exit 0
+          fi
+
+          # Candidate hermesc locations commonly used by RN/Hermes packages
+          CANDIDATES=(
+            "node_modules/react-native/sdks/hermesc/linux-arm64/bin/hermesc"
+            "node_modules/react-native/sdks/hermesc/linux64-bin/hermesc"
+            "node_modules/hermes-engine/linux-arm64/bin/hermesc"
+            "node_modules/hermes-engine/linux64-bin/hermesc"
+            "node_modules/react-native/sdks/hermes/build/bin/hermesc"
+          )
+
+          FOUND=""
+          for path in "${CANDIDATES[@]}"; do
+            if [[ -f "$path" ]]; then
+              FOUND="$path"
+              break
+            fi
+          done
+
+          if [[ -z "$FOUND" ]]; then
+            echo "⚠️ Could not locate a Hermes compiler binary in node_modules on ARM."
+            echo "   If your project requires Hermes, ensure your react-native/hermes-engine version ships linux-arm64 hermesc."
+            echo "   Otherwise, consider using JSC for this build or provide a custom hermesCommand via project settings."
+            # Do not fail here; Gradle will still produce a clearer error if needed.
+            exit 0
+          fi
+
+          # Ensure executability
+          chmod +x "$FOUND" || true
+
+          # Configure Gradle project property via global gradle.properties (avoids modifying repo)
+          mkdir -p "$HOME/.gradle"
+          GRADLE_PROPS="$HOME/.gradle/gradle.properties"
+
+          # Remove any previous setting
+          if [[ -f "$GRADLE_PROPS" ]]; then
+            sed -i.bak '/^react\.hermesCommand\s*=\s*/d' "$GRADLE_PROPS" || true
+          fi
+
+          echo "react.hermesCommand=$(pwd)/$FOUND" >> "$GRADLE_PROPS"
+          echo "✅ Set react.hermesCommand to $(pwd)/$FOUND"
+          echo "📄 Wrote to $GRADLE_PROPS"
+
+      - name: Cache Gradle
+        uses: actions/cache@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4.0.2
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ steps.cache-keys.outputs.combined_hash }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: EAS Build Local
+        id: eas_build
+        # timeout-minutes: ${{ inputs.build_timeout }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          BUILD_COMMANDS: ${{ inputs.build_commands }}
+        run: |
+          echo "⚙️ Running EAS build command..."
+          echo "Command: $BUILD_COMMANDS"
+
+          # Execute the build command with proper error handling
+          # Use a temporary script to ensure proper exit code propagation
+          TEMP_SCRIPT="/tmp/eas_build_script.sh"
+          echo '#!/bin/bash' > "$TEMP_SCRIPT"
+          echo 'set -e  # Exit on any error' >> "$TEMP_SCRIPT"
+          echo 'set -o pipefail  # Exit if any command in a pipe fails' >> "$TEMP_SCRIPT"
+          echo '' >> "$TEMP_SCRIPT"
+          echo '# Execute the actual build commands' >> "$TEMP_SCRIPT"
+          echo "$BUILD_COMMANDS" >> "$TEMP_SCRIPT"
+
+          chmod +x "$TEMP_SCRIPT"
+
+          echo "🔧 Executing build script with strict error handling..."
+          if "$TEMP_SCRIPT"; then
+            echo "✅ Build command completed successfully"
+
+            # Verify build artifacts were created
+            echo "🔍 Checking for build artifacts..."
+            APK_FILES=$(find . -name "*.apk" -type f 2>/dev/null || true)
+            AAB_FILES=$(find . -name "*.aab" -type f 2>/dev/null || true)
+
+            if [ -z "$APK_FILES" ] && [ -z "$AAB_FILES" ]; then
+              echo "❌ No build artifacts (APK/AAB files) found after build completion"
+              echo "This may indicate the build failed despite the command completing"
+              exit 1
+            else
+              echo "✅ Build artifacts found:"
+              [ -n "$APK_FILES" ] && echo "APK files: $APK_FILES"
+              [ -n "$AAB_FILES" ] && echo "AAB files: $AAB_FILES"
+            fi
+          else
+            echo "❌ Build command failed with exit code: $?"
+            exit 1
+          fi
+
+          # Clean up temporary script
+          rm -f "$TEMP_SCRIPT"
+
+          echo "✅ Build completed successfully"
+
+      - name: Upload Build Artifacts to S3
+        if: ${{ inputs.s3_upload_artifacts_enabled && success() }}
+        id: s3_upload
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
+          AWS_REGION: ${{ inputs.aws_region }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
+          S3_BUILD_ARTIFACTS_BUCKET: ${{ inputs.s3_build_artifacts_bucket }}
+        with:
+          timeout_minutes: ${{ inputs.s3_upload_timeout }}
+          max_attempts: ${{ inputs.s3_upload_attempts }}
+          retry_wait_seconds: ${{ inputs.s3_upload_retry_wait_time }}
+          command: |
+            echo "📦 Uploading build artifacts to S3..."
+
+            # Create a unique folder structure for this build
+            BUILD_FOLDER="$REPOSITORY_NAME/${{ github.ref_name }}/${{ github.run_id }}-${{ github.run_attempt }}"
+            UPLOADED_FILES=0
+
+            # Find and upload APK files
+            echo "🔍 Searching for APK files..."
+            APK_FILES=$(find . -name "*.apk" -type f)
+            if [ -n "$APK_FILES" ]; then
+              while read apk_file; do
+                if [ -f "$apk_file" ]; then
+                  filename=$(basename "$apk_file")
+                  s3_path="s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/$filename"
+                  echo "⬆️ Uploading $filename to $s3_path"
+                  if aws s3 cp "$apk_file" "$s3_path"; then
+                    echo "✅ Successfully uploaded $filename"
+                    UPLOADED_FILES=$((UPLOADED_FILES + 1))
+                  else
+                    echo "❌ Failed to upload $filename"
+                    exit 1
+                  fi
+                fi
+              done <<< "$APK_FILES"
+            else
+              echo "⚠️ No APK files found"
+            fi
+
+            # Find and upload AAB files
+            echo "🔍 Searching for AAB files..."
+            AAB_FILES=$(find . -name "*.aab" -type f)
+            if [ -n "$AAB_FILES" ]; then
+              echo "$AAB_FILES" | while read aab_file; do
+                if [ -f "$aab_file" ]; then
+                  filename=$(basename "$aab_file")
+                  s3_path="s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/$filename"
+                  echo "⬆️ Uploading $filename to $s3_path"
+                  if aws s3 cp "$aab_file" "$s3_path"; then
+                    echo "✅ Successfully uploaded $filename"
+                    UPLOADED_FILES=$((UPLOADED_FILES + 1))
+                  else
+                    echo "❌ Failed to upload $filename"
+                    exit 1
+                  fi
+                fi
+              done
+            else
+              echo "⚠️ No AAB files found"
+            fi
+
+            # Upload entire build directory if it exists
+            if [ -d "build" ]; then
+              echo "⬆️ Uploading build directory..."
+              if aws s3 sync build/ "s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/build/" --exclude "*.log"; then
+                echo "✅ Successfully uploaded build directory"
+                UPLOADED_FILES=$((UPLOADED_FILES + 1))
+              else
+                echo "❌ Failed to upload build directory"
+                exit 1
+              fi
+            else
+              echo "⚠️ No build directory found"
+            fi
+
+            # Set outputs
+            echo "📊 Total files uploaded: $UPLOADED_FILES"
+            if [ $UPLOADED_FILES -eq 0 ]; then
+              echo "⚠️ No build artifacts found to upload"
+            fi
+
+            # Generate and display S3 URLs
+            echo "🔗 Build artifacts uploaded to:"
+            echo "S3 Location: s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/"
+
+            # Set step outputs for Slack notifications
+            echo "uploaded_count=$UPLOADED_FILES" >> $GITHUB_OUTPUT
+            echo "s3_path=s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/" >> $GITHUB_OUTPUT
+            echo "s3_download_url=https://$S3_BUILD_ARTIFACTS_BUCKET.s3.$AWS_REGION.amazonaws.com/$BUILD_FOLDER/" >> $GITHUB_OUTPUT
+
+            # Debug: List uploaded files in S3
+            echo "🔍 Debug: Listing uploaded files in S3..."
+            aws s3 ls "s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/" --recursive || echo "⚠️ Could not list S3 files"
+
+            # Find the first uploaded APK file for direct download URL
+            echo "🔍 Finding uploaded APK file for direct download..."
+            APK_FILE_PATH=$(aws s3 ls "s3://$S3_BUILD_ARTIFACTS_BUCKET/$BUILD_FOLDER/" --recursive | grep "\.apk$" | head -1 | awk '{print $4}')
+            if [ -n "$APK_FILE_PATH" ]; then
+              DIRECT_APK_URL="https://$S3_BUILD_ARTIFACTS_BUCKET.s3.$AWS_REGION.amazonaws.com/$APK_FILE_PATH"
+              echo "direct_apk_url=$DIRECT_APK_URL" >> $GITHUB_OUTPUT
+              echo "✅ Found APK file: $APK_FILE_PATH"
+              echo "✅ Direct download URL: $DIRECT_APK_URL"
+            else
+              echo "⚠️ No APK file found for direct download URL"
+            fi
+
+      - name: Install Firebase CLI
+        if: ${{ inputs.firebase_cli_enabled }}
+        uses: pocket-apps/action-setup-firebase@486462a3072d959c60568f070a1063cf29a43380 # v2
+        with:
+          firebase-token: ${{ secrets.FIREBASE_TOKEN }}
+
+      - name: Distribute to Firebase App Distribution
+        if: ${{ inputs.firebase_app_distribution_enabled && success() }}
+        id: firebase_distribution
+        uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
+        env:
+          FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+          FIREBASE_APP_ID: ${{ inputs.firebase_app_id }}
+          FIREBASE_RELEASE_NOTES: ${{ inputs.firebase_release_notes }}
+          FIREBASE_TESTERS: ${{ inputs.firebase_testers }}
+          FIREBASE_TESTERS_FILE: ${{ inputs.firebase_testers_file }}
+          FIREBASE_GROUPS: ${{ inputs.firebase_groups }}
+        with:
+          timeout_minutes: ${{ inputs.firebase_distribution_timeout }}
+          max_attempts: ${{ inputs.firebase_distribution_attempts }}
+          retry_wait_seconds: ${{ inputs.firebase_distribution_retry_wait_time }}
+          command: |
+            echo "📱 Distributing build to Firebase App Distribution..."
+
+            # Find APK files only
+            APK_FILES=$(find . -name "*.apk" -type f)
+
+            if [ -n "$APK_FILES" ]; then
+              BUILD_FILE=$(echo "$APK_FILES" | head -n 1)
+              echo "📦 Found APK file: $BUILD_FILE"
+            else
+              echo "❌ No APK files found for Firebase distribution"
+              exit 1
+            fi
+
+            # Build Firebase distribution command
+            FIREBASE_CMD="firebase appdistribution:distribute \"$BUILD_FILE\" --app $FIREBASE_APP_ID --release-notes \"$FIREBASE_RELEASE_NOTES\""
+
+            # Add testers if specified
+            if [ -n "$FIREBASE_TESTERS" ]; then
+              FIREBASE_CMD="$FIREBASE_CMD --testers $FIREBASE_TESTERS"
+            fi
+
+            # Add testers file if specified
+            if [ -n "$FIREBASE_TESTERS_FILE" ]; then
+              FIREBASE_CMD="$FIREBASE_CMD --testers-file $FIREBASE_TESTERS_FILE"
+            fi
+
+            # Add groups if specified
+            if [ -n "$FIREBASE_GROUPS" ]; then
+              FIREBASE_CMD="$FIREBASE_CMD --groups $FIREBASE_GROUPS"
+            fi
+
+            echo "🚀 Executing: $FIREBASE_CMD"
+
+            # Execute Firebase distribution
+            DISTRIBUTION_OUTPUT=$(eval $FIREBASE_CMD 2>&1)
+            DISTRIBUTION_EXIT_CODE=$?
+
+            echo "$DISTRIBUTION_OUTPUT"
+
+            if [ $DISTRIBUTION_EXIT_CODE -eq 0 ]; then
+              echo "✅ Firebase App Distribution completed successfully"
+
+              # Extract Firebase console URI from output
+              FIREBASE_CONSOLE_URI=$(echo "$DISTRIBUTION_OUTPUT" | grep "firebase_console_uri" | sed 's/.*firebase_console_uri: //')
+              if [ -n "$FIREBASE_CONSOLE_URI" ]; then
+                echo "firebase_console_uri=$FIREBASE_CONSOLE_URI" >> $GITHUB_OUTPUT
+              fi
+
+              # Extract testing URI from output
+              TESTING_URI=$(echo "$DISTRIBUTION_OUTPUT" | grep "testing_uri" | sed 's/.*testing_uri: //')
+              if [ -n "$TESTING_URI" ]; then
+                echo "testing_uri=$TESTING_URI" >> $GITHUB_OUTPUT
+              fi
+
+              # Extract binary download URI from output
+              BINARY_DOWNLOAD_URI=$(echo "$DISTRIBUTION_OUTPUT" | grep "binary_download_uri" | sed 's/.*binary_download_uri: //')
+              if [ -n "$BINARY_DOWNLOAD_URI" ]; then
+                echo "binary_download_uri=$BINARY_DOWNLOAD_URI" >> $GITHUB_OUTPUT
+              fi
+
+              echo "firebase_distribution_success=true" >> $GITHUB_OUTPUT
+            else
+              echo "❌ Firebase App Distribution failed"
+              echo "firebase_distribution_success=false" >> $GITHUB_OUTPUT
+              exit 1
+            fi
+
+      - name: Send Slack - Success
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.update
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            ts: ${{ steps.slack.outputs.ts }}
+            attachments:
+              - fallback: "✅ EAS Local build completed successfully!"
+                color: "#2eb886"
+                title: "✅ Build Completed Successfully"
+                text: "EAS Local build for ${{ inputs.repository_name }} has completed successfully!"
+                fields:
+                  - title: "Repository"
+                    value: "${{ github.repository }}"
+                    short: true
+                  - title: "Branch"
+                    value: "${{ github.ref_name }}"
+                    short: true
+                  - title: "Build Profile"
+                    value: "${{ inputs.eas_build_profile }}"
+                    short: true
+                  - title: "Artifacts"
+                    value: "${{ inputs.s3_upload_artifacts_enabled && 'S3 Upload' || (inputs.firebase_app_distribution_enabled && 'Firebase Distribution') || 'None' }}"
+                    short: true
+                  - title: "Storage Location"
+                    value: "${{ inputs.s3_upload_artifacts_enabled && format('s3://{0}/{1}/{2}/{3}-{4}/', inputs.s3_build_artifacts_bucket, inputs.repository_name, github.ref_name, github.run_id, github.run_attempt) || (inputs.firebase_app_distribution_enabled && 'Firebase App Distribution') || 'N/A' }}"
+                    short: false
+                actions:
+                  - type: "button"
+                    text: "View Build Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+
+      - name: Send Slack - Add S3 Download Button
+        if: success() && inputs.slack_notify_enabled && inputs.s3_upload_artifacts_enabled
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.update
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            ts: ${{ steps.slack.outputs.ts }}
+            attachments:
+              - fallback: "✅ EAS Local build completed successfully!"
+                color: "#2eb886"
+                title: "✅ Build Completed Successfully"
+                text: "EAS Local build for ${{ inputs.repository_name }} has completed successfully!"
+                fields:
+                  - title: "Repository"
+                    value: "${{ github.repository }}"
+                    short: true
+                  - title: "Branch"
+                    value: "${{ github.ref_name }}"
+                    short: true
+                  - title: "Build Profile"
+                    value: "${{ inputs.eas_build_profile }}"
+                    short: true
+                  - title: "Artifacts"
+                    value: "S3 Upload"
+                    short: true
+                  - title: "Storage Location"
+                    value: "s3://${{ inputs.s3_build_artifacts_bucket }}/${{ inputs.repository_name }}/${{ github.ref_name }}/${{ github.run_id }}-${{ github.run_attempt }}/"
+                    short: false
+                actions:
+                  - type: "button"
+                    text: "View Build Logs"
+                    url: "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    style: "primary"
+                  - type: "button"
+                    text: "Download APK"
+                    url: "${{ steps.s3_upload.outputs.direct_apk_url || format('https://{0}.s3.{1}.amazonaws.com/{2}/{3}/{4}-{5}/', inputs.s3_build_artifacts_bucket, inputs.aws_region, inputs.repository_name, github.ref_name, github.run_id, github.run_attempt) }}"
+                    style: "default"
+
+      - name: Send Slack - Add Success Reaction
+        if: success() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts || '' }}
+            name: "white_check_mark"
+
+      - name: Send Slack - Failure
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            thread_ts: ${{ steps.slack.outputs.ts || '' }}
+            text: "❌ EAS Local build failed!"
+
+      - name: Send Slack - Add Failure Reaction
+        if: failure() && inputs.slack_notify_enabled
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
+        with:
+          method: reactions.add
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            channel: ${{ inputs.slack_channel_id }}
+            timestamp: ${{ steps.slack.outputs.ts || '' }}
+            name: "x"
