@@ -52,6 +52,7 @@ These parameters must be provided when calling the workflow:
 | `dockerfile_context_path` | Build context path for Docker | `.` |
 | `build_args` | Build arguments in `KEY=VALUE` format, one per line | (none) |
 | `runner` | GitHub runner label | `ubuntu-latest` |
+| `push_to_ecr` | Enable/disable pushing the built image to AWS ECR | `true` |
 | `aws_ssm_parameter_prefix` | Prefix path for SSM parameters used to create the `.env` file | - |
 | `aws_ssm_dotnet_app_settings_parameter_prefix` | Name of the SSM parameter containing the .NET appsettings JSON/text | - |
 | `aws_ssm_dotnet_app_settings_path_destination` | Destination path for generated .NET settings file | - |
@@ -238,6 +239,37 @@ jobs:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+```
+
+## Example 4: CI-Only Testing (Build without Push)
+
+Useful for pull request verification and continuous integration (testing only) where you want to ensure the Docker image builds successfully, but do not want to push the finished image to AWS ECR:
+
+```yaml
+name: "CI Build Verification"
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  build-test:
+    uses: your-org/your-repo/.github/workflows/build-docker.yml@main
+    with:
+      repository_name: "my-service"
+      build_env: "test"
+      dockerfile_path: "./Dockerfile"
+      tag: "test"
+      image_name: "my-service"
+      aws_account_id: "123456789012"
+      aws_region: "us-east-1"
+      aws_ssm_generate_env_file_enabled: false
+      aws_ssm_generate_dotnet_app_settings_enabled: false
+      slack_notify_enabled: false
+      push_to_ecr: false # <--- Disable pushing the built image to ECR
+    secrets:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 ```
 
 ## Best Practices
