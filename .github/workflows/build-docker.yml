@@ -42,8 +42,13 @@ on:
       runner:
         required: true
         type: string
-        default: 'ubuntu-latest'
-        description: 'Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)'
+        default: "ubuntu-latest"
+        description: "Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)"
+      push_to_ecr:
+        required: false
+        type: boolean
+        default: true
+        description: "Enable/disable pushing the built image to AWS ECR"
 
       # AWS ECR settings
       aws_account_id:
@@ -322,28 +327,32 @@ jobs:
             "${{ inputs.dockerfile_context_path }}" \
             --progress=plain
 
-          echo "🏷️ Tagging image: $CACHE_TAG to $FINAL_TAG"
-          docker tag "$CACHE_TAG" "$FINAL_TAG"
+          if [ "${{ inputs.push_to_ecr }}" = "true" ]; then
+            echo "🏷️ Tagging image: $CACHE_TAG to $FINAL_TAG"
+            docker tag "$CACHE_TAG" "$FINAL_TAG"
 
-          echo "⬆️ Pushing image to ECR..."
-          max_attempts=3
-          attempt=1
+            echo "⬆️ Pushing image to ECR..."
+            max_attempts=3
+            attempt=1
 
-          while [ $attempt -le $max_attempts ]; do
-            echo "🔄 Push attempt $attempt of $max_attempts"
-            if docker push "$FINAL_TAG"; then
-              echo "✅ Successfully pushed image to ECR"
-              break
-            else
-              if [ $attempt -eq $max_attempts ]; then
-                echo "❌ Failed to push image to ECR after $max_attempts attempts"
-                exit 1
+            while [ $attempt -le $max_attempts ]; do
+              echo "🔄 Push attempt $attempt of $max_attempts"
+              if docker push "$FINAL_TAG"; then
+                echo "✅ Successfully pushed image to ECR"
+                break
+              else
+                if [ $attempt -eq $max_attempts ]; then
+                  echo "❌ Failed to push image to ECR after $max_attempts attempts"
+                  exit 1
+                fi
+                echo "⚠️ Push failed, waiting 10 seconds before retry..."
+                sleep 10
+                attempt=$((attempt + 1))
               fi
-              echo "⚠️ Push failed, waiting 10 seconds before retry..."
-              sleep 10
-              attempt=$((attempt + 1))
-            fi
-          done
+            done
+          else
+            echo "ℹ️ push_to_ecr is set to false. Skipping ECR tagging and pushing."
+          fi
 
       - name: Send Slack - Success
         if: success()
