@@ -1,0 +1,564 @@
+---
+name: "Provision EC2 Ephemeral Runner for EAS"
+
+on:
+  workflow_call:
+    secrets:
+      SELF_HOSTED_RUNNER_ACCESS_TOKEN:
+        required: true
+        description: "PAT used for cross-repo checkout and GitHub runner API calls"
+      AWS_ACCESS_KEY_ID:
+        required: true
+        description: "AWS access key id for provisioning"
+      AWS_SECRET_ACCESS_KEY:
+        required: true
+        description: "AWS secret access key for provisioning"
+    inputs:
+      kind:
+        required: true
+        type: string
+        description: "Whether to provision or destruct instance"
+      bifrost_repository:
+        required: true
+        type: string
+        description: "Bifrost repository to check out"
+      bifrost_repository_branch_ref:
+        required: false
+        type: string
+        description: "Bifrost branch to clone"
+        default: "main"
+      terraform_version:
+        required: false
+        type: string
+        default: "1.13.1"
+      aws_region:
+        required: false
+        type: string
+        default: "ap-southeast-1"
+      terraform_workdir:
+        required: true
+        type: string
+      ansible_workdir:
+        required: false
+        type: string
+        default: ""
+      ansible_playbook:
+        required: false
+        type: string
+        default: ""
+      ansible_config:
+        required: false
+        type: string
+        default: ""
+      ansible_ssh_enabled:
+        required: false
+        type: boolean
+        default: true
+      ansible_ssh_key_aws_ssm_parameter_store_path:
+        required: true
+        type: string
+        description: "SSM Parameter Store path containing the SSH private key"
+      ansible_vault_enabled:
+        required: false
+        type: boolean
+        default: true
+      ansible_vault_aws_ssm_parameter_store_path:
+        required: true
+        type: string
+        description: "SSM Parameter Store path containing the Ansible Vault password"
+      ephemeral_runner_label:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+
+jobs:
+  run:
+    runs-on: ${{ inputs.runner }}
+    permissions:
+      contents: read
+    concurrency:
+      group: bifrost-ec2-ephemeral-${{ github.repository }}-${{ inputs.terraform_workdir }}-${{ inputs.kind }}
+      cancel-in-progress: false
+    env:
+      TF_IN_AUTOMATION: "true"
+      TF_PLUGIN_CACHE_DIR: /tmp/terraform-plugin-cache-${{ inputs.ephemeral_runner_label }}
+      TF_DATA_DIR: /tmp/terraform-data-${{ inputs.ephemeral_runner_label }}-${{ inputs.terraform_workdir }}
+      TF_PROVIDER_MIRROR_DIR: /tmp/terraform-provider-mirror-${{ inputs.ephemeral_runner_label }}
+      TF_CLI_CONFIG_FILE: /tmp/terraform-cli-${{ inputs.ephemeral_runner_label }}.hcl
+    steps:
+      - name: Checkout to Bifrost repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: ${{ inputs.bifrost_repository }}
+          ref: ${{ inputs.bifrost_repository_branch_ref }}
+          token: ${{ secrets.SELF_HOSTED_RUNNER_ACCESS_TOKEN }}
+
+      - name: Validate inputs and Terraform directory
+        env:
+          INPUT_KIND: ${{ inputs.kind }}
+          INPUT_TERRAFORM_VERSION: ${{ inputs.terraform_version }}
+          INPUT_TERRAFORM_WORKDIR: ${{ inputs.terraform_workdir }}
+          INPUT_ANSIBLE_WORKDIR: ${{ inputs.ansible_workdir }}
+          INPUT_ANSIBLE_CONFIG: ${{ inputs.ansible_config }}
+          INPUT_ANSIBLE_PLAYBOOK: ${{ inputs.ansible_playbook }}
+        run: |
+          set -euo pipefail
+          echo "Validating 'kind' input..."
+          case "$INPUT_KIND" in
+            provision|destroy) echo "kind=$INPUT_KIND is valid" ;;
+            *) echo "❌ Invalid kind: '$INPUT_KIND'. Expected 'provision' or 'destroy'."; exit 1 ;;
+          esac
+
+          echo "Validating terraform_version is semver..."
+          if ! echo "$INPUT_TERRAFORM_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "❌ terraform_version must be a full semver (e.g., 1.5.7). Got: '$INPUT_TERRAFORM_VERSION'"
+            exit 1
+          fi
+
+          echo "Validating terraform_workdir domain safety..."
+          if [[ "$INPUT_TERRAFORM_WORKDIR" != *eas-github* ]]; then
+            echo "❌ terraform_workdir ('$INPUT_TERRAFORM_WORKDIR') must contain 'eas-github' to restrict scope to EAS GitHub runners."
+            exit 1
+          fi
+
+          echo "Validating terraform_workdir exists and contains .tf files..."
+          if [ ! -d "$INPUT_TERRAFORM_WORKDIR" ]; then
+            echo "❌ Directory does not exist: $INPUT_TERRAFORM_WORKDIR"; exit 1
+          fi
+          if ! ls "$INPUT_TERRAFORM_WORKDIR"/*.tf >/dev/null 2>&1; then
+            echo "❌ No Terraform (.tf) files found in: $INPUT_TERRAFORM_WORKDIR"; exit 1
+          fi
+
+          if [[ "$INPUT_KIND" == "provision" ]]; then
+            echo "Validating Ansible inputs and paths (provision only)..."
+            if [ -z "$INPUT_ANSIBLE_WORKDIR" ]; then
+              echo "❌ 'ansible_workdir' is required for provision"; exit 1
+            fi
+            if [ ! -d "$INPUT_ANSIBLE_WORKDIR" ]; then
+              echo "❌ Directory does not exist: $INPUT_ANSIBLE_WORKDIR"; exit 1
+            fi
+            ANSIBLE_CFG_PATH="$INPUT_ANSIBLE_CONFIG"
+            if [ -z "$ANSIBLE_CFG_PATH" ]; then
+              echo "❌ 'ansible_config' is required for provision"; exit 1
+            fi
+            if [[ "$ANSIBLE_CFG_PATH" != /* ]]; then
+              ANSIBLE_CFG_PATH="$INPUT_ANSIBLE_WORKDIR/$ANSIBLE_CFG_PATH"
+            fi
+            if [ ! -f "$ANSIBLE_CFG_PATH" ]; then
+              echo "❌ Ansible config not found: $ANSIBLE_CFG_PATH"; exit 1
+            fi
+            ANSIBLE_PLAYBOOK_PATH="$INPUT_ANSIBLE_PLAYBOOK"
+            if [ -z "$ANSIBLE_PLAYBOOK_PATH" ]; then
+              echo "❌ 'ansible_playbook' is required for provision"; exit 1
+            fi
+            if [[ "$ANSIBLE_PLAYBOOK_PATH" != /* ]]; then
+              ANSIBLE_PLAYBOOK_PATH="$INPUT_ANSIBLE_WORKDIR/$ANSIBLE_PLAYBOOK_PATH"
+            fi
+            if [ ! -f "$ANSIBLE_PLAYBOOK_PATH" ]; then
+              echo "❌ Ansible playbook not found: $ANSIBLE_PLAYBOOK_PATH"; exit 1
+            fi
+          else
+            echo "Skipping Ansible validation for kind='$INPUT_KIND'"
+          fi
+          echo "✅ Validation passed."
+
+      - name: Install Terraform CLI (if missing)
+        env:
+          INPUT_TERRAFORM_VERSION: ${{ inputs.terraform_version }}
+        run: |
+          set -euo pipefail
+          VERSION="$INPUT_TERRAFORM_VERSION"
+          DEST="/tmp/terraform-cli/$INPUT_TERRAFORM_VERSION/bin"
+          if [ -x "$DEST/terraform" ]; then
+            echo "Terraform already installed at $DEST/terraform"
+            exit 0
+          fi
+          mkdir -p "$DEST"
+          OS="$(uname | tr '[:upper:]' '[:lower:]')"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH=amd64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
+          esac
+          FILE="terraform_${VERSION}_${OS}_${ARCH}.zip"
+          URL="https://releases.hashicorp.com/terraform/${VERSION}/${FILE}"
+          echo "Downloading $URL"
+          curl -fsSL "$URL" -o /tmp/terraform.zip
+          if command -v unzip >/dev/null 2>&1; then
+            unzip -q -o /tmp/terraform.zip -d "$DEST"
+          else
+            echo "unzip not found; extracting with Python zipfile"
+            DEST="$DEST" python3 -c "import zipfile, os; zipfile.ZipFile('/tmp/terraform.zip').extractall(os.environ['DEST'])"
+          fi
+          chmod +x "$DEST/terraform"
+          rm -f /tmp/terraform.zip
+
+      - name: Add Terraform to PATH
+        env:
+          INPUT_TERRAFORM_VERSION: ${{ inputs.terraform_version }}
+        run: |
+          BIN_DIR="/tmp/terraform-cli/$INPUT_TERRAFORM_VERSION/bin"
+          echo "$BIN_DIR" >> "$GITHUB_PATH"
+          export PATH="$BIN_DIR:$PATH"
+
+      - name: Prepare Terraform plugin cache dir
+        run: |
+          mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          # Optional: relax permissions if multiple runner users share the host
+          chmod 755 "$TF_PLUGIN_CACHE_DIR" || true
+          echo "Using TF_PLUGIN_CACHE_DIR=$TF_PLUGIN_CACHE_DIR"
+          # Prepare Terraform data dir for module cache
+          mkdir -p "$TF_DATA_DIR"
+          chmod 755 "$TF_DATA_DIR" || true
+          echo "Using TF_DATA_DIR=$TF_DATA_DIR"
+          # Prepare provider mirror dir (for provider_installation filesystem_mirror)
+          mkdir -p "$TF_PROVIDER_MIRROR_DIR"
+          chmod 755 "$TF_PROVIDER_MIRROR_DIR" || true
+          echo "Using TF_PROVIDER_MIRROR_DIR=$TF_PROVIDER_MIRROR_DIR"
+
+      - name: Configure Terraform provider mirror
+        run: |
+          cat > "$TF_CLI_CONFIG_FILE" <<EOF
+          provider_installation {
+            filesystem_mirror {
+              path    = "$TF_PROVIDER_MIRROR_DIR"
+              include = ["hashicorp/*", "*/*"]
+            }
+            direct {}
+          }
+          EOF
+          echo "Wrote TF_CLI_CONFIG_FILE=$TF_CLI_CONFIG_FILE"
+
+      - name: Verify Terraform CLI
+        run: |
+          which terraform || true
+          echo "PATH=$PATH"
+          terraform -version
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@c59e0df692590711cfcf4c14fd4e26c075ddf34e # v2.2.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Verify AWS identity
+        run: |
+          set -euo pipefail
+          echo "Verifying AWS caller identity and region..."
+          aws sts get-caller-identity
+          echo "AWS Region: ${{ inputs.aws_region }}"
+
+      - name: Initialize Terraform (for provider analysis)
+        if: ${{ inputs.kind == 'provision' || inputs.kind == 'destroy' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -euo pipefail
+          echo "Initializing Terraform to install modules and analyze providers..."
+          terraform init -input=false -no-color -backend=false
+
+      - name: Compute Terraform lock hash
+        id: tf-lock
+        if: ${{ inputs.kind == 'provision' || inputs.kind == 'destroy' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -euo pipefail
+          LOCK_FILE=".terraform.lock.hcl"
+          if [ ! -f "$LOCK_FILE" ]; then
+            echo "No lockfile found; generating provider lock for linux_amd64..."
+            terraform providers lock -platform=linux_amd64
+          fi
+          echo "lock_file_present=true" >> $GITHUB_OUTPUT
+          echo "lock_hash=$(sha256sum "$LOCK_FILE" | awk '{print $1}')" >> $GITHUB_OUTPUT
+
+      - name: Prefetch providers into mirror
+        if: ${{ inputs.kind == 'provision' || inputs.kind == 'destroy' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -euo pipefail
+          LOCK_FILE=".terraform.lock.hcl"
+          # Compute lockfile hash to detect changes (already ensured by previous step)
+          LOCK_HASH="${{ steps.tf-lock.outputs.lock_hash }}"
+          STAMP_FILE="$TF_PROVIDER_MIRROR_DIR/.lockhash"
+          if [ -f "$STAMP_FILE" ] && [ "$(cat "$STAMP_FILE")" = "$LOCK_HASH" ]; then
+            echo "Provider mirror already up-to-date (hash=$LOCK_HASH); skipping prefetch."
+            exit 0
+          fi
+          echo "Prefetching providers into mirror (hash=$LOCK_HASH)..."
+          terraform providers mirror "$TF_PROVIDER_MIRROR_DIR"
+          echo "$LOCK_HASH" > "$STAMP_FILE"
+
+      - name: Always destroy before apply
+        id: "always-destroy"
+        if: ${{ inputs.kind == 'provision' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -o nounset
+          echo "Preparing best-effort cleanup before provision (non-blocking)."
+
+          retry() {
+            local attempts="$1"; shift
+            local base_delay_sec="$1"; shift
+            local n=1
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$n" -ge "$attempts" ]; then
+                return 1
+              fi
+              local sleep_for=$(( base_delay_sec * n ))
+              echo "Command failed. Retry $n/$attempts after ${sleep_for}s..."
+              sleep "$sleep_for"
+              n=$(( n + 1 ))
+            done
+          }
+
+          echo "Initializing Terraform (best-effort)..."
+          retry 3 5 terraform init -input=false -no-color -reconfigure || echo "terraform init best-effort failed; continuing"
+
+          echo "Attempting terraform destroy (best-effort, ignore if nothing to destroy)..."
+          if ! retry 3 10 terraform destroy -auto-approve -input=false -no-color -lock=true -lock-timeout=5m; then
+            echo "terraform destroy failed after retries; attempting fallback with -refresh=false (best-effort)"
+            retry 2 15 terraform destroy -auto-approve -input=false -no-color -lock=true -lock-timeout=5m -refresh=false || echo "fallback destroy failed; continuing"
+          fi
+
+          echo "Removing .terraform directory to free space (best-effort)..."
+          rm -rf .terraform .terraform.lock.hcl || true
+
+      - name: Cleanup GitHub Runner registration (org) - preprovision
+        if: ${{ inputs.kind == 'provision' && inputs.ephemeral_runner_label != '' }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.SELF_HOSTED_RUNNER_ACCESS_TOKEN }}
+          script: |
+            const org = context.repo.owner;
+            const label = `${{ inputs.ephemeral_runner_label }}`;
+            let page = 1;
+            let total = 0;
+            core.info(`Searching for offline org runners with label: ${label}`);
+            while (true) {
+              const { data } = await github.request('GET /orgs/{org}/actions/runners', {
+                org,
+                per_page: 100,
+                page,
+              });
+              const runners = data.runners || [];
+              if (!runners.length) break;
+              for (const r of runners) {
+                const labels = (r.labels || []).map(l => l.name);
+                if (labels.includes(label) && r.status === 'offline') {
+                  try {
+                    await github.request('DELETE /orgs/{org}/actions/runners/{runner_id}', {
+                      org,
+                      runner_id: r.id,
+                    });
+                    core.info(`Deleted offline runner ${r.name} (${r.id})`);
+                    total++;
+                  } catch (e) {
+                    core.warning(`Failed to delete runner ${r.name} (${r.id}): ${e.message}`);
+                  }
+                }
+              }
+              page++;
+            }
+            core.info(`Cleanup complete. Deleted ${total} runner(s) labeled '${label}'.`);
+
+      - name: Provision AWS EC2 Ephemeral Instance
+        id: "provision"
+        if: ${{ inputs.kind == 'provision' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -euo pipefail
+          echo "Initializing Terraform..."
+          terraform init -input=false -no-color -reconfigure
+          echo "Planning infrastructure changes..."
+          terraform validate -no-color
+          terraform plan -input=false -no-color -lock=true -lock-timeout=5m -out=tfplan
+          echo "Applying plan..."
+          terraform apply -input=false -no-color -auto-approve -lock=true -lock-timeout=5m tfplan
+          echo "Provisioning completed successfully."
+
+      - name: Register AWS EC2 Ephemeral Instance as GitHub Actions Runner
+        id: "register"
+        if: ${{ inputs.kind == 'provision' }}
+        working-directory: ${{ inputs.ansible_workdir }}
+        env:
+          ANSIBLE_SSH_ENABLED: ${{ inputs.ansible_ssh_enabled }}
+          ANSIBLE_SSH_KEY_AWS_SSM_PARAMETER_STORE_PATH: ${{ inputs.ansible_ssh_key_aws_ssm_parameter_store_path }}
+          ANSIBLE_VAULT_ENABLED: ${{ inputs.ansible_vault_enabled }}
+          ANSIBLE_VAULT_AWS_SSM_PARAMETER_STORE_PATH: ${{ inputs.ansible_vault_aws_ssm_parameter_store_path }}
+          ANSIBLE_PLAYBOOK: ${{ inputs.ansible_playbook }}
+        run: |
+          set -euo pipefail
+          TEMP_SSH_DIR=$(mktemp -d)
+          echo "🔧 Setting up temporary directory at $TEMP_SSH_DIR"
+
+          # Setup SSH key from AWS SSM Parameter Store
+          if [[ "$ANSIBLE_SSH_ENABLED" == "true" ]]; then
+            echo "Configuring SSH key..."
+            touch $TEMP_SSH_DIR/private_key
+            if ! aws ssm get-parameter --name "$ANSIBLE_SSH_KEY_AWS_SSM_PARAMETER_STORE_PATH" --with-decryption --query Parameter.Value --output text > $TEMP_SSH_DIR/private_key; then
+              echo "Failed to fetch SSH key from SSM"
+              exit 1
+            fi
+            chmod 400 $TEMP_SSH_DIR/private_key
+            eval "$(ssh-agent -s)"
+            if ! ssh-add $TEMP_SSH_DIR/private_key; then
+              echo "Failed to add SSH key"
+              exit 1
+            fi
+            echo "SSH key configured successfully"
+          fi
+
+          # Setup Vault password from AWS SSM Parameter Store
+          if [[ "$ANSIBLE_VAULT_ENABLED" == "true" ]]; then
+            echo "Setting up Ansible Vault password..."
+            touch $TEMP_SSH_DIR/ansible-vault-password
+            if ! aws ssm get-parameter --name "$ANSIBLE_VAULT_AWS_SSM_PARAMETER_STORE_PATH" --with-decryption --query Parameter.Value --output text > $TEMP_SSH_DIR/ansible-vault-password; then
+              echo "Failed to fetch Vault password from SSM"
+              exit 1
+            fi
+            export ANSIBLE_VAULT_PASSWORD_FILE=$TEMP_SSH_DIR/ansible-vault-password
+            echo "Vault password configured successfully"
+          fi
+          # Build ansible extra args conditionally
+          ANSIBLE_ARGS=""
+          if [[ "$ANSIBLE_VAULT_ENABLED" == "true" ]]; then
+            ANSIBLE_ARGS="--vault-password-file $TEMP_SSH_DIR/ansible-vault-password"
+          fi
+
+          ansible-playbook $ANSIBLE_PLAYBOOK ${ANSIBLE_ARGS}
+
+          # Cleanup
+          echo "Cleaning up..."
+          ssh-agent -k || true
+          rm -rf $TEMP_SSH_DIR
+          echo "All done!"
+
+      - name: Wait for ephemeral runner to be online
+        if: ${{ inputs.kind == 'provision' && inputs.ephemeral_runner_label != '' }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.SELF_HOSTED_RUNNER_ACCESS_TOKEN }}
+          script: |
+            const org = context.repo.owner;
+            const label = `${{ inputs.ephemeral_runner_label }}`;
+            const deadline = Date.now() + 10 * 60 * 1000; // 10 minutes
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            let attempt = 0;
+            core.info(`Waiting for runner with label '${label}' to come online (timeout 10m)...`);
+            while (Date.now() < deadline) {
+              attempt++;
+              try {
+                let page = 1;
+                let foundOnline = false;
+                do {
+                  const { data } = await github.request('GET /orgs/{org}/actions/runners', {
+                    org,
+                    per_page: 100,
+                    page,
+                  });
+                  const runners = data.runners || [];
+                  for (const r of runners) {
+                    const labels = (r.labels || []).map(l => l.name);
+                    if (labels.includes(label) && r.status === 'online') {
+                      core.info(`Runner online: ${r.name} (${r.id})`);
+                      foundOnline = true;
+                      break;
+                    }
+                  }
+                  if (foundOnline) break;
+                  if (!runners.length) break;
+                  page++;
+                } while (true);
+
+                if (foundOnline) {
+                  core.info('Ephemeral runner is online.');
+                  return;
+                }
+              } catch (e) {
+                core.warning(`Attempt ${attempt}: error while checking runners: ${e.message}`);
+              }
+              core.info(`Attempt ${attempt}: runner not online yet; sleeping 3s...`);
+              await sleep(3000);
+            }
+            core.setFailed(`Timed out waiting for runner with label '${label}' to be online within 10 minutes.`);
+
+      - name: Destroy AWS EC2 Ephemeral Instance
+        id: "destroy"
+        if: ${{ inputs.kind == 'destroy' }}
+        working-directory: ${{ inputs.terraform_workdir }}
+        run: |
+          set -euo pipefail
+
+          retry() {
+            local attempts="$1"; shift
+            local base_delay_sec="$1"; shift
+            local n=1
+            while true; do
+              if "$@"; then
+                return 0
+              fi
+              if [ "$n" -ge "$attempts" ]; then
+                return 1
+              fi
+              local sleep_for=$(( base_delay_sec * n ))
+              echo "Command failed. Retry $n/$attempts after ${sleep_for}s..."
+              sleep "$sleep_for"
+              n=$(( n + 1 ))
+            done
+          }
+
+          echo "Initializing Terraform for destroy (with retries)..."
+          retry 3 5 terraform init -input=false -no-color -reconfigure
+
+          echo "Destroying infrastructure (with retries)..."
+          if ! retry 3 10 terraform destroy -auto-approve -input=false -no-color -lock=true -lock-timeout=5m; then
+            echo "terraform destroy failed after retries; attempting fallback with -refresh=false"
+            retry 2 15 terraform destroy -auto-approve -input=false -no-color -lock=true -lock-timeout=5m -refresh=false
+          fi
+
+          echo "Cleaning up Terraform local state and cache..."
+          rm -rf .terraform .terraform.lock.hcl tfplan || true
+
+      - name: Cleanup GitHub Runner registration (org)
+        if: ${{ inputs.kind == 'destroy' && inputs.ephemeral_runner_label != '' }}
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          github-token: ${{ secrets.SELF_HOSTED_RUNNER_ACCESS_TOKEN }}
+          script: |
+            const org = context.repo.owner;
+            const label = `${{ inputs.ephemeral_runner_label }}`;
+            let page = 1;
+            let total = 0;
+            core.info(`Searching for offline org runners with label: ${label}`);
+            while (true) {
+              const { data } = await github.request('GET /orgs/{org}/actions/runners', {
+                org,
+                per_page: 100,
+                page,
+              });
+              const runners = data.runners || [];
+              if (!runners.length) break;
+              for (const r of runners) {
+                const labels = (r.labels || []).map(l => l.name);
+                if (labels.includes(label) && r.status === 'offline') {
+                  try {
+                    await github.request('DELETE /orgs/{org}/actions/runners/{runner_id}', {
+                      org,
+                      runner_id: r.id,
+                    });
+                    core.info(`Deleted offline runner ${r.name} (${r.id})`);
+                    total++;
+                  } catch (e) {
+                    core.warning(`Failed to delete runner ${r.name} (${r.id}): ${e.message}`);
+                  }
+                }
+              }
+              page++;
+            }
+            core.info(`Cleanup complete. Deleted ${total} runner(s) labeled '${label}'.`);

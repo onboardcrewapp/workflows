@@ -15,3 +15,5 @@ These workflows are specifically tailored to our internal infrastructure and run
 
 - [internal-argocd-app-sync.yml](.github/workflows/internal-argocd-app-sync-documentation.md) – **Internal** workflow for syncing ArgoCD applications; tailored for the OnBoard Crew App team and provided as a reference only.
 - [internal-deploy-nextjs-to-aws-s3-cloudfront.yml](.github/workflows/internal-deploy-nextjs-to-aws-s3-cloudfront-documentation.md) – **Internal** Next.js static site build and S3/CloudFront deployment with caching and Slack support.
+- [internal-provision-eas-android-ec2-ephemeral-runner.yml](.github/workflows/internal-provision-eas-android-ec2-ephemeral-runner-documentation.md) – **Internal** workflow to provision or destroy an EC2 ephemeral runner for EAS Android builds.
+- [internal-build-eas-android-ec2-ephemeral-runner.yml](.github/workflows/internal-build-eas-android-ec2-ephemeral-runner-documentation.md) – **Internal** workflow to execute EAS local Android builds on an EC2 ephemeral runner with optional S3 and Firebase App Distribution support.
