@@ -13,7 +13,7 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 
 ### Provisioning (`kind: provision`)
 
-1. **Checkout**: Clones the specified Bifrost infrastructure repository containing Terraform and Ansible code.
+1. **Checkout**: Clones the specified Ansible infrastructure repository containing Terraform and Ansible code.
 2. **Input Validation**: Ensures required paths and configurations are provided and validates that the `terraform_workdir` targets an `eas-github` scope for security.
 3. **Environment Setup**: Installs the specified version of Terraform, configures AWS credentials, and sets up a local provider mirror for caching.
 4. **Pre-cleanup**: Best-effort destruction of existing resources and cleanup of any offline runners in the GitHub organization sharing the same label.
@@ -23,7 +23,7 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 
 ### Destruction (`kind: destroy`)
 
-1. **Environment Setup**: Clones the Bifrost repository, installs Terraform, and configures AWS credentials.
+1. **Environment Setup**: Clones the Ansible repository, installs Terraform, and configures AWS credentials.
 2. **Terraform Destroy**: Runs `terraform destroy` with automatic retries to tear down the EC2 infrastructure.
 3. **Runner Cleanup**: Removes the offline runner entry from the GitHub organization using the provided label.
 
@@ -32,7 +32,7 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 | Input | Description |
 |-------|-------------|
 | `kind` | Action to perform: `"provision"` or `"destroy"`. |
-| `bifrost_repository` | Name of the infrastructure repository to check out. |
+| `ansible_repository` | Name of the infrastructure repository to check out. |
 | `terraform_workdir` | Path to the Terraform directory (must contain `eas-github`). |
 | `ephemeral_runner_label` | The label assigned to the runner (used for wait/cleanup logic). |
 | `runner` | GitHub runner label to execute this provisioning workflow. |
@@ -50,7 +50,7 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 
 ## Optional Inputs and Defaults
 
-- `bifrost_repository_branch_ref` (default: `"main"`): Branch to clone from the Bifrost repository.
+- `ansible_repository_branch_ref` (default: `"main"`): Branch to clone from the Ansible repository.
 - `terraform_version` (default: `"1.13.1"`): Version of the Terraform CLI to install.
 - `aws_region` (default: `"ap-southeast-1"`): AWS Region for AWS credentials.
 - `ansible_workdir` (default: `""`): Path to the Ansible working directory.
@@ -71,7 +71,7 @@ jobs:
     with:
       kind: "provision"
       runner: "ubuntu-latest"
-      bifrost_repository: "your-org/bifrost-infra"
+      ansible_repository: "your-org/ansible-infra"
       terraform_workdir: "terraform/eas-github-runner"
       ansible_workdir: "ansible/eas-github-runner"
       ansible_config: "ansible.cfg"
@@ -96,7 +96,7 @@ jobs:
     with:
       kind: "destroy"
       runner: "ubuntu-latest"
-      bifrost_repository: "your-org/bifrost-infra"
+      ansible_repository: "your-org/ansible-infra"
       terraform_workdir: "terraform/eas-github-runner"
       ephemeral_runner_label: "eas-android-ephemeral-1"
       # These must be provided to satisfy the schema, even if unused during destroy

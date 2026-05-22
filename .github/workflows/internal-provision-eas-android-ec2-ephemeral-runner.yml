@@ -15,14 +15,14 @@ on:
         required: true
         type: string
         description: "Whether to provision or destruct instance"
-      bifrost_repository:
+      ansible_repository:
         required: true
         type: string
-        description: "Bifrost repository to check out"
-      bifrost_repository_branch_ref:
+        description: "Ansible repository to check out"
+      ansible_repository_branch_ref:
         required: false
         type: string
-        description: "Bifrost branch to clone"
+        description: "Ansible branch to clone"
         default: "main"
       terraform_version:
         required: false
@@ -86,11 +86,11 @@ jobs:
       TF_PROVIDER_MIRROR_DIR: /tmp/terraform-provider-mirror-${{ inputs.ephemeral_runner_label }}
       TF_CLI_CONFIG_FILE: /tmp/terraform-cli-${{ inputs.ephemeral_runner_label }}.hcl
     steps:
-      - name: Checkout to Bifrost repository
+      - name: Checkout to Ansible repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          repository: ${{ inputs.bifrost_repository }}
-          ref: ${{ inputs.bifrost_repository_branch_ref }}
+          repository: ${{ inputs.ansible_repository }}
+          ref: ${{ inputs.ansible_repository_branch_ref }}
           token: ${{ secrets.SELF_HOSTED_RUNNER_ACCESS_TOKEN }}
 
       - name: Validate inputs and Terraform directory
