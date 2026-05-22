@@ -174,10 +174,9 @@ on:
         description: "Wait time in seconds between Firebase distribution retry attempts"
 
     secrets:
-      AWS_ACCESS_KEY_ID:
+      AWS_ROLE_TO_ASSUME:
         required: true
-      AWS_SECRET_ACCESS_KEY:
-        required: true
+        description: "IAM Role ARN to assume via OIDC"
       SLACK_BOT_TOKEN:
         required: false
       FIREBASE_TOKEN:
@@ -189,6 +188,7 @@ jobs:
   build:
     runs-on: ${{ inputs.runner }}
     permissions:
+      id-token: write
       contents: read
     steps:
       - name: Validate Required Inputs
@@ -231,6 +231,12 @@ jobs:
 
       - name: Checkout Code
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
 
       - name: Send Slack - Start
         if: ${{ inputs.slack_notify_enabled }}
@@ -471,8 +477,6 @@ jobs:
         id: eas_build
         # timeout-minutes: ${{ inputs.build_timeout }}
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -526,8 +530,6 @@ jobs:
         id: s3_upload
         uses: nick-fields/retry@7152eba30c6575329ac0576536151aca5a72780e # v3.0.0
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           AWS_DEFAULT_REGION: ${{ inputs.aws_region }}
           AWS_REGION: ${{ inputs.aws_region }}
           REPOSITORY_NAME: ${{ inputs.repository_name }}

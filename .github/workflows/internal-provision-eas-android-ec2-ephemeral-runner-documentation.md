@@ -46,8 +46,7 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 | Secret | Description |
 |--------|-------------|
 | `SELF_HOSTED_RUNNER_ACCESS_TOKEN` | Personal Access Token (PAT) used for cross-repo checkout and GitHub API calls (runner registration/cleanup). |
-| `AWS_ACCESS_KEY_ID` | AWS access key ID for Terraform provisioning and SSM access. |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret access key for Terraform provisioning and SSM access. |
+| `AWS_ROLE_TO_ASSUME` | IAM Role ARN to assume via OIDC for Terraform provisioning and SSM access. |
 
 ## Optional Inputs and Defaults
 
@@ -65,6 +64,9 @@ Depending on the `kind` input (`provision` or `destroy`), the workflow performs 
 ```yaml
 jobs:
   provision-runner:
+    permissions:
+      id-token: write
+      contents: read
     uses: your-org/your-repo/.github/workflows/internal-provision-eas-android-ec2-ephemeral-runner.yml@main
     with:
       kind: "provision"
@@ -79,8 +81,7 @@ jobs:
       ansible_vault_aws_ssm_parameter_store_path: "/bifrost/ansible/vault_pass"
     secrets:
       SELF_HOSTED_RUNNER_ACCESS_TOKEN: ${{ secrets.PAT_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
 ```
 
 ## Example 2: Destroying a Runner
@@ -88,6 +89,9 @@ jobs:
 ```yaml
 jobs:
   destroy-runner:
+    permissions:
+      id-token: write
+      contents: read
     uses: your-org/your-repo/.github/workflows/internal-provision-eas-android-ec2-ephemeral-runner.yml@main
     with:
       kind: "destroy"
@@ -100,8 +104,7 @@ jobs:
       ansible_vault_aws_ssm_parameter_store_path: "/bifrost/ansible/vault_pass"
     secrets:
       SELF_HOSTED_RUNNER_ACCESS_TOKEN: ${{ secrets.PAT_TOKEN }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
 ```
 
 ## Best Practices

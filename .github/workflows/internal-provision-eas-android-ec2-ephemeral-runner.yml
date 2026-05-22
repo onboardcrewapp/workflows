@@ -7,12 +7,9 @@ on:
       SELF_HOSTED_RUNNER_ACCESS_TOKEN:
         required: true
         description: "PAT used for cross-repo checkout and GitHub runner API calls"
-      AWS_ACCESS_KEY_ID:
+      AWS_ROLE_TO_ASSUME:
         required: true
-        description: "AWS access key id for provisioning"
-      AWS_SECRET_ACCESS_KEY:
-        required: true
-        description: "AWS secret access key for provisioning"
+        description: "IAM Role ARN to assume via OIDC"
     inputs:
       kind:
         required: true
@@ -77,6 +74,7 @@ jobs:
   run:
     runs-on: ${{ inputs.runner }}
     permissions:
+      id-token: write
       contents: read
     concurrency:
       group: bifrost-ec2-ephemeral-${{ github.repository }}-${{ inputs.terraform_workdir }}-${{ inputs.kind }}
@@ -239,10 +237,9 @@ jobs:
           terraform -version
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@c59e0df692590711cfcf4c14fd4e26c075ddf34e # v2.2.0
+        uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ inputs.aws_region }}
 
       - name: Verify AWS identity
