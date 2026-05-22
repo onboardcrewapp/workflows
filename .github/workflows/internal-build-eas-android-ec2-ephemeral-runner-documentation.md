@@ -37,8 +37,7 @@ Steps performed by the workflow:
 
 | Secret | Description |
 |--------|-------------|
-| `AWS_ACCESS_KEY_ID` | AWS access key for S3 uploads. |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret access key for S3 uploads. |
+| `AWS_ROLE_TO_ASSUME` | IAM Role ARN to assume via OIDC for AWS operations. |
 | `EXPO_TOKEN` | Token for authenticating with Expo/EAS. |
 
 *Note: Depending on optional features enabled, `SLACK_BOT_TOKEN` and `FIREBASE_TOKEN` may also be required.*
@@ -71,6 +70,9 @@ The workflow provides extensive customization through optional inputs:
 ```yaml
 jobs:
   build:
+    permissions:
+      id-token: write
+      contents: read
     uses: your-org/your-repo/.github/workflows/internal-build-eas-android-ec2-ephemeral-runner.yml@main
     with:
       repository_name: "crew-app"
@@ -83,8 +85,7 @@ jobs:
       s3_upload_artifacts_enabled: true
       s3_build_artifacts_bucket: "my-build-artifacts-bucket"
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
 ```
 
@@ -93,6 +94,9 @@ jobs:
 ```yaml
 jobs:
   build_and_distribute:
+    permissions:
+      id-token: write
+      contents: read
     uses: your-org/your-repo/.github/workflows/internal-build-eas-android-ec2-ephemeral-runner.yml@main
     with:
       repository_name: "crew-app"
@@ -116,8 +120,7 @@ jobs:
       firebase_groups: "qa-team,internal-testers"
       firebase_release_notes: "New staging build ${{ github.sha }}"
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
       FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
