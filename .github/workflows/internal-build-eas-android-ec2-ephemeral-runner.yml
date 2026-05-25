@@ -297,7 +297,24 @@ jobs:
 
       - name: Install Android NDK
         run: |
-          export PATH=$ANDROID_HOME/cmdline-tools/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin:$ANDROID_HOME/tools/bin:$PATH
+          # Detect modern Java-compatible sdkmanager in system-wide /opt/android-sdk or user-local dir
+          MODERN_SDKMANAGER=$(find /opt/android-sdk "$ANDROID_HOME" -name "sdkmanager" 2>/dev/null | grep -v "tools/bin" | head -n 1 || true)
+          if [ -n "$MODERN_SDKMANAGER" ]; then
+            echo "✅ Found modern sdkmanager at: $MODERN_SDKMANAGER"
+            SDK_BIN_DIR=$(dirname "$MODERN_SDKMANAGER")
+            export PATH="$SDK_BIN_DIR:$PATH"
+            # If it's in /opt/android-sdk, update env variables
+            if [[ "$MODERN_SDKMANAGER" == /opt/android-sdk/* ]]; then
+              export ANDROID_HOME="/opt/android-sdk"
+              export ANDROID_SDK_ROOT="/opt/android-sdk"
+              echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+              echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+            fi
+          else
+            echo "⚠️ No modern sdkmanager found; falling back to default PATH search."
+            export PATH=$ANDROID_HOME/cmdline-tools/bin:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/cmdline-tools/tools/bin:$ANDROID_HOME/tools/bin:$PATH
+          fi
+
           which sdkmanager
           sdkmanager --install "ndk;${{ inputs.android_ndk_version }}" "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ inputs.android_ndk_version }}" >> $GITHUB_ENV
