@@ -389,6 +389,7 @@ jobs:
           ANSIBLE_VAULT_ENABLED: ${{ inputs.ansible_vault_enabled }}
           ANSIBLE_VAULT_AWS_SSM_PARAMETER_STORE_PATH: ${{ inputs.ansible_vault_aws_ssm_parameter_store_path }}
           ANSIBLE_PLAYBOOK: ${{ inputs.ansible_playbook }}
+          ANSIBLE_CONFIG: ${{ inputs.ansible_config }}
         run: |
           set -euo pipefail
           TEMP_SSH_DIR=$(mktemp -d)
