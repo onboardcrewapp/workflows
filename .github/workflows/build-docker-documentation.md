@@ -41,8 +41,7 @@ These parameters must be provided when calling the workflow:
 
 | Secret | Description |
 |--------|-------------|
-| `AWS_ACCESS_KEY_ID` | AWS Access Key ID with permissions for SSM and ECR |
-| `AWS_SECRET_ACCESS_KEY` | AWS Secret Access Key |
+| `AWS_ROLE_TO_ASSUME` | IAM Role ARN to assume via OIDC |
 | `SLACK_BOT_TOKEN` | Slack Bot Token (required if `slack_notify_enabled` is set to `true`) |
 
 ## Optional Parameters
@@ -121,8 +120,7 @@ jobs:
       aws_ssm_generate_dotnet_app_settings_enabled: false
       slack_notify_enabled: false
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
 ```
 
 ## Example 2: Comprehensive Configuration
@@ -170,8 +168,7 @@ jobs:
       slack_notify_enabled: true
       slack_channel_id: "C1234567890"
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 ```
 
@@ -236,8 +233,7 @@ jobs:
       slack_notify_enabled: true
       slack_channel_id: "C1234567890"
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 ```
 
@@ -268,8 +264,7 @@ jobs:
       slack_notify_enabled: false
       push_to_ecr: false # <--- Disable pushing the built image to ECR
     secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
 ```
 
 ## Best Practices
