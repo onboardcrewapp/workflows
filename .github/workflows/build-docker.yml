@@ -347,7 +347,7 @@ jobs:
           fi
 
       - name: Send Slack - Success
-        if: success()
+        if: success() && inputs.slack_notify_enabled
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -358,7 +358,7 @@ jobs:
             text: "✅ Docker image build completed successfully!"
 
       - name: Send Slack - Add Success Reaction
-        if: success()
+        if: success() && inputs.slack_notify_enabled
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: reactions.add
@@ -369,7 +369,7 @@ jobs:
             name: "white_check_mark"
 
       - name: Send Slack - Failure
-        if: failure()
+        if: failure() && inputs.slack_notify_enabled
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: chat.postMessage
@@ -380,7 +380,7 @@ jobs:
             text: "❌ Docker image build failed!"
 
       - name: Send Slack - Add Failure Reaction
-        if: failure()
+        if: failure() && inputs.slack_notify_enabled
         uses: slackapi/slack-github-action@v2.0.0
         with:
           method: reactions.add
