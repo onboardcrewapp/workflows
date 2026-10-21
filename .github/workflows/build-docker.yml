@@ -2,7 +2,7 @@
 # - AWS SSM Parameter Store integration for environment variable management
 # - .NET app settings generation from AWS SSM parameters with optional pre-generation command
 # - Slack notifications for build status updates
-# - AWS ECR authentication and image pushing with retry logic
+# - AWS ECR authentication, image building, and image pushing with retry logic
 ---
 name: "Build and Push Docker Image"
 
@@ -23,7 +23,7 @@ on:
         type: string
         description: "Path to the Dockerfile relative to repository root"
       dockerfile_context_path:
-        required: true
+        required: false
         type: string
         default: "."
         description: "Build context path for Docker, defaults to repository root"
@@ -40,7 +40,7 @@ on:
         type: string
         description: "Name of the Docker image to be built and pushed"
       runner:
-        required: true
+        required: false
         type: string
         default: "ubuntu-latest"
         description: "Runner label to execute on (e.g. self-hosted-android, ubuntu-latest)"
@@ -56,12 +56,12 @@ on:
         type: string
         description: "AWS Account ID where ECR repository exists"
       aws_region:
-        required: true
+        required: false
         type: string
         default: "ap-southeast-1"
         description: "AWS Region where ECR repository is located"
       aws_ssm_generate_env_file_enabled:
-        required: true
+        required: false
         type: boolean
         default: false
         description: "Enable/disable .env file generation from AWS SSM parameters"
@@ -72,7 +72,7 @@ on:
 
       # .NET Extras settings
       aws_ssm_generate_dotnet_app_settings_enabled:
-        required: true
+        required: false
         type: boolean
         default: false
       aws_ssm_dotnet_app_settings_parameter_prefix:
@@ -90,7 +90,7 @@ on:
 
       # Slack notification settings
       slack_notify_enabled:
-        required: true
+        required: false
         type: boolean
         default: false
         description: "Enable/disable Slack notifications for build events"
@@ -116,7 +116,7 @@ jobs:
       contents: read
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@e3dd6a429d7300a6a4c196c26e071d42e0343502 # v4.0.2
@@ -127,28 +127,30 @@ jobs:
       - name: Prepare Commit Message
         if: ${{ inputs.slack_notify_enabled }}
         id: prepare_message
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-
           NO_NEWLINES_MSG=$(echo "$COMMIT_MSG" | tr -d '\r' | tr '\n' ' ')
           ORIGINAL_LENGTH=${#NO_NEWLINES_MSG}
-          TRUNCATED_MSG=$(echo "$NO_NEWLINES_MSG" | head -c 500)
+          TRUNCATED_MSG="${NO_NEWLINES_MSG:0:500}"
 
-          if [ $ORIGINAL_LENGTH -gt 500 ]; then
+          if [ "$ORIGINAL_LENGTH" -gt 500 ]; then
             TRUNCATED_MSG="${TRUNCATED_MSG}... (truncated)"
           fi
 
-          TRUNCATED_MSG=$(echo "$TRUNCATED_MSG" | sed 's/"/\\"/g')
+          TRUNCATED_MSG="${TRUNCATED_MSG//\"/\\\"}"
 
           # Ensure the value written to GITHUB_OUTPUT is terminated by a newline so the closing delimiter is recognized.
-          echo "truncated_message<<EOF" >> "$GITHUB_OUTPUT"
-          printf '%s\n' "$TRUNCATED_MSG" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
+          {
+            echo "truncated_message<<EOF"
+            printf '%s\n' "$TRUNCATED_MSG"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Send Slack - Start
         if: ${{ inputs.slack_notify_enabled }}
         id: "slack"
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -180,6 +182,8 @@ jobs:
 
       - name: Generate .env file from AWS SSM Parameter Store
         if: ${{ inputs.aws_ssm_generate_env_file_enabled }}
+        env:
+          SSM_PARAMETER_PREFIX: ${{ inputs.aws_ssm_parameter_prefix }}
         run: |
           echo "🗑️ Cleaning up existing .env files..."
           rm -f .env*
@@ -190,11 +194,11 @@ jobs:
           while [ $attempt -le $max_attempts ]; do
             echo "⚙️ Generating .env file (Attempt $attempt of $max_attempts)..."
             if aws ssm get-parameters-by-path \
-              --path "${{ inputs.aws_ssm_parameter_prefix }}" \
+              --path "$SSM_PARAMETER_PREFIX" \
               --recursive \
               --with-decryption \
               --query "Parameters[*].{Name:Name,Value:Value}" \
-              --output json | jq -r --arg SSM_ENV "${{ inputs.aws_ssm_parameter_prefix }}" \
+              --output json | jq -r --arg SSM_ENV "$SSM_PARAMETER_PREFIX" \
               '.[] | "\(.Name | sub($SSM_ENV + "/"; ""))=\(.Value)"' > .env; then
 
               if [ -s .env ]; then
@@ -217,11 +221,17 @@ jobs:
 
       - name: Generate .NET App Settings from AWS SSM Parameter Store
         if: ${{ inputs.aws_ssm_generate_dotnet_app_settings_enabled }}
+        env:
+          PREGENERATE_COMMAND: ${{ inputs.aws_ssm_dotnet_app_pregenerate_custom_command }}
+          SSM_DOTNET_PARAMETER_PREFIX: ${{ inputs.aws_ssm_dotnet_app_settings_parameter_prefix }}
+          APP_SETTINGS_PATH: ${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}
         run: |
-          # Execute pre-generate custom command if provided
-          if [ -n "${{ inputs.aws_ssm_dotnet_app_pregenerate_custom_command }}" ]; then
+          # Execute pre-generate custom command if provided.
+          # WARNING: this command comes from the calling workflow and is executed
+          # as-is. Only pass trusted, reviewed values here.
+          if [ -n "$PREGENERATE_COMMAND" ]; then
             echo "⚙️ Executing custom pre-generate command..."
-            if ! eval "${{ inputs.aws_ssm_dotnet_app_pregenerate_custom_command }}"; then
+            if ! bash -c "$PREGENERATE_COMMAND"; then
               echo "❌ Custom pre-generate command failed"
               exit 1
             fi
@@ -229,19 +239,19 @@ jobs:
           fi
 
           # Create directory for app settings if it doesn't exist
-          mkdir -p "$(dirname "${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}")"
+          mkdir -p "$(dirname "$APP_SETTINGS_PATH")"
 
           max_attempts=3
           attempt=1
 
           while [ $attempt -le $max_attempts ]; do
             echo "⚙️ Generating app settings (Attempt $attempt of $max_attempts)..."
-            if aws ssm get-parameter --name ${{ inputs.aws_ssm_dotnet_app_settings_parameter_prefix }} \
-                    --query "Parameter.Value" --output text --with-decryption > "${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}"; then
+            if aws ssm get-parameter --name "$SSM_DOTNET_PARAMETER_PREFIX" \
+                    --query "Parameter.Value" --output text --with-decryption > "$APP_SETTINGS_PATH"; then
 
               # Verify app settings file exists and has content
-              if [ -s "${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}" ]; then
-                total_lines=$(wc -l < "${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}")
+              if [ -s "$APP_SETTINGS_PATH" ]; then
+                total_lines=$(wc -l < "$APP_SETTINGS_PATH")
                 echo "✅ App settings file generated successfully with configuration data"
                 echo "🔢 Total lines: $total_lines"
                 break
@@ -259,6 +269,9 @@ jobs:
           done
 
       - name: Login to AWS ECR
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
         run: |
           echo "🔐 Authenticating with AWS ECR..."
           max_attempts=3
@@ -266,7 +279,7 @@ jobs:
 
           while [ $attempt -le $max_attempts ]; do
             echo "⚙️ ECR login attempt $attempt of $max_attempts..."
-            if aws ecr get-login-password --region ${{ inputs.aws_region }} | docker login --username AWS --password-stdin ${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com; then
+            if aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"; then
               echo "✅ Successfully authenticated with ECR"
               break
             fi
@@ -282,44 +295,80 @@ jobs:
           done
 
       - name: Build and Push Docker Image
+        env:
+          AWS_REGION: ${{ inputs.aws_region }}
+          AWS_ACCOUNT_ID: ${{ inputs.aws_account_id }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_TAG: ${{ inputs.tag }}
+          DOCKERFILE_PATH: ${{ inputs.dockerfile_path }}
+          DOCKERFILE_CONTEXT_PATH: ${{ inputs.dockerfile_context_path }}
+          BUILD_ARGS: ${{ inputs.build_args }}
+          PUSH_TO_ECR: ${{ inputs.push_to_ecr }}
         run: |
-          ECR_REPO_URL="${{ inputs.aws_account_id }}.dkr.ecr.${{ inputs.aws_region }}.amazonaws.com/${{ inputs.image_name }}"
+          ECR_REPO_URL="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_NAME"
           BRANCH_NAME=$(git rev-parse --abbrev-ref HEAD | tr '/' '-' | tr '[:upper:]' '[:lower:]' | tr '_' '-')
           CACHE_TAG="$ECR_REPO_URL:cache-$BRANCH_NAME"
-          FINAL_TAG="$ECR_REPO_URL:${{ inputs.tag }}"
+          FINAL_TAG="$ECR_REPO_URL:$IMAGE_TAG"
 
           echo "🔍 Validating Docker build prerequisites..."
-          if [ ! -f "${{ inputs.dockerfile_path }}" ]; then
-            echo "❌ Dockerfile not found at ${{ inputs.dockerfile_path }}"
+          if [ ! -f "$DOCKERFILE_PATH" ]; then
+            echo "❌ Dockerfile not found at $DOCKERFILE_PATH"
             exit 1
           fi
 
-          if [ ! -d "${{ inputs.dockerfile_context_path }}" ]; then
-            echo "❌ Build context directory not found at ${{ inputs.dockerfile_context_path }}"
+          if [ ! -d "$DOCKERFILE_CONTEXT_PATH" ]; then
+            echo "❌ Build context directory not found at $DOCKERFILE_CONTEXT_PATH"
             exit 1
           fi
 
-          BUILD_ARGS=""
-          if [ -n "${{ inputs.build_args }}" ]; then
+          BUILD_ARG_WORDS=()
+          if [ -n "$BUILD_ARGS" ]; then
             echo "🔧 Processing build arguments..."
-            while IFS='=' read -r key value; do
-              BUILD_ARGS="${{ inputs.build_args }} --build-arg $key=$value"
-            done <<< "${{ inputs.build_args }}"
+            while IFS= read -r BUILD_ARG_LINE; do
+              [ -z "$BUILD_ARG_LINE" ] && continue
+              if [[ "$BUILD_ARG_LINE" == --* ]]; then
+                read -r -a BUILD_ARG_LINE_WORDS <<< "$BUILD_ARG_LINE"
+                BUILD_ARG_WORDS+=("${BUILD_ARG_LINE_WORDS[@]}")
+              else
+                BUILD_ARG_WORDS+=(--build-arg "$BUILD_ARG_LINE")
+              fi
+            done <<< "$BUILD_ARGS"
           fi
 
           echo "📦 Building Docker image..."
           echo "🏗️ Using ECR Repository: $ECR_REPO_URL"
           echo "🏷️ Tag: $CACHE_TAG"
-          echo "🛠️ Build arguments: ${{ inputs.build_args }}"
+          if [ ${#BUILD_ARG_WORDS[@]} -gt 0 ]; then
+            echo "🛠️ Build arguments: provided (values hidden)"
+          else
+            echo "🛠️ Build arguments: none"
+          fi
 
-          DOCKER_BUILDKIT=1 docker build \
-            ${{ inputs.build_args }} \
-            -t "$CACHE_TAG" \
-            -f "${{ inputs.dockerfile_path }}" \
-            "${{ inputs.dockerfile_context_path }}" \
-            --progress=plain
+          max_attempts=3
+          attempt=1
 
-          if [ "${{ inputs.push_to_ecr }}" = "true" ]; then
+          while [ $attempt -le $max_attempts ]; do
+            echo "🔄 Build attempt $attempt of $max_attempts"
+            if DOCKER_BUILDKIT=1 docker build \
+              "${BUILD_ARG_WORDS[@]}" \
+              -t "$CACHE_TAG" \
+              -f "$DOCKERFILE_PATH" \
+              "$DOCKERFILE_CONTEXT_PATH" \
+              --progress=plain; then
+              echo "✅ Successfully built Docker image"
+              break
+            else
+              if [ $attempt -eq $max_attempts ]; then
+                echo "❌ Failed to build Docker image after $max_attempts attempts"
+                exit 1
+              fi
+              echo "⚠️ Build failed, waiting 10 seconds before retry..."
+              sleep 10
+              attempt=$((attempt + 1))
+            fi
+          done
+
+          if [ "$PUSH_TO_ECR" = "true" ]; then
             echo "🏷️ Tagging image: $CACHE_TAG to $FINAL_TAG"
             docker tag "$CACHE_TAG" "$FINAL_TAG"
 
@@ -346,9 +395,20 @@ jobs:
             echo "ℹ️ push_to_ecr is set to false. Skipping ECR tagging and pushing."
           fi
 
+      - name: Clean Up Generated Secret Files
+        if: always() && (inputs.aws_ssm_generate_env_file_enabled || inputs.aws_ssm_generate_dotnet_app_settings_enabled)
+        env:
+          APP_SETTINGS_PATH: ${{ inputs.aws_ssm_dotnet_app_settings_path_destination }}
+        run: |
+          echo "🧹 Removing generated secret files from workspace..."
+          rm -f .env*
+          if [ -n "$APP_SETTINGS_PATH" ]; then
+            rm -f "$APP_SETTINGS_PATH"
+          fi
+
       - name: Send Slack - Success
         if: success() && inputs.slack_notify_enabled
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -359,7 +419,7 @@ jobs:
 
       - name: Send Slack - Add Success Reaction
         if: success() && inputs.slack_notify_enabled
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: reactions.add
           token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -370,7 +430,7 @@ jobs:
 
       - name: Send Slack - Failure
         if: failure() && inputs.slack_notify_enabled
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: chat.postMessage
           token: ${{ secrets.SLACK_BOT_TOKEN }}
@@ -381,7 +441,7 @@ jobs:
 
       - name: Send Slack - Add Failure Reaction
         if: failure() && inputs.slack_notify_enabled
-        uses: slackapi/slack-github-action@v2.0.0
+        uses: slackapi/slack-github-action@485a9d42d3a73031f12ec201c457e2162c45d02d # v2.0.0
         with:
           method: reactions.add
           token: ${{ secrets.SLACK_BOT_TOKEN }}
