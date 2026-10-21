@@ -12,7 +12,7 @@ The `build-docker.yml` workflow automates the following tasks:
 - Generating a `.env` file from AWS SSM Parameter Store (optional)
 - Generating .NET appsettings from AWS SSM (optional)
 - Authenticating with AWS ECR with retry logic
-- Building the Docker image with cache tagging
+- Building the Docker image with cache tagging and retry logic
 - Tagging and pushing the image to AWS ECR with retry logic
 - Sending Slack notifications for start, success, and failure
 
@@ -70,7 +70,7 @@ The workflow includes specialized support for retrieving application settings fo
   - installing helper tools (`dotnet tool install ...`)
   - preparing environment for conditional logic
 
-> 📌 The pre-generate command is executed with `set -e` style behavior: if it fails, the build stops with an error.
+> 📌 The pre-generate command runs via `bash -c` from the calling workflow and is executed as-is. Only pass trusted, reviewed values here; never wire it to PR-controlled or other untrusted data. If the command fails, the build stops with an error.
 
 ### How it works
 
@@ -89,7 +89,7 @@ The retry loop mirrors other AWS calls in the workflow, protecting against trans
 - **Large settings** – SSM parameters are limited to 4 KB. For larger JSON blobs split them into multiple parameters and concatenate them in a `build_args` or `pregenerate` command before writing the final file.
 - **Binary data** – the parameter value is treated as UTF-8 text. If you need binary data, base64‑encode it and decode in a custom command.
 - **Multiple environments** – combine this feature with the environment helpers from Example 3. Use different parameter names per environment and ensure the destination path matches your Dockerfile's `COPY` instructions.
-- **Secrecy** – the settings file is written to the workspace and then included in the Docker build. Ensure your `.dockerignore` prevents accidental inclusion in source control, or generate settings inside the container instead if secrecy is a concern.
+- **Secrecy** – the settings file is written to the workspace and then included in the Docker build. Ensure your `.dockerignore` prevents accidental inclusion in source control, or generate settings inside the container instead if secrecy is a concern. The workflow removes generated `.env*` and app-settings files in an `always()` cleanup step, which matters on self-hosted runners.
 
 These details make the .NET extras more transparent and easier to adapt to unusual scenarios.
 
@@ -287,7 +287,7 @@ build_args: |
   FEATURE_FLAG=true
 ```
 
-The workflow loops over the lines and appends `--build-arg` flags to the `docker build` command.
+The workflow converts each line into a `--build-arg` flag for the `docker build` command. Lines already starting with `--` are passed through unchanged for advanced cases. Values are not echoed to the logs.
 
 ### Pre-populated .NET Settings
 
@@ -303,7 +303,7 @@ Optionally provide a `aws_ssm_dotnet_app_pregenerate_custom_command` to create d
 
 ### Retry Logic
 
-All network operations – SSM retrieval, ECR login, Docker push – include built‑in retries to make CI more resilient to transient failures. You do not need to implement your own loops unless you have special requirements.
+All network operations – SSM retrieval, ECR login, Docker build, Docker push – include built‑in retries (3 attempts, 10 second backoff) to make CI more resilient to transient failures. You do not need to implement your own loops unless you have special requirements.
 
 ## Troubleshooting
 
